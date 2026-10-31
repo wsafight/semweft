@@ -25,6 +25,8 @@ cd /path/to/cargo-workspace
 semweft symbol stock --include-body
 semweft symbol-at src/order.rs:12:8
 semweft refs stock --source L3
+semweft impls inventory::Deduct --path crates/inventory
+semweft impls inventory::Deduct::deduct --source L3 --format json
 semweft calls stock --direction callers --depth 3
 semweft impact --diff WORKTREE --format markdown
 semweft impact --diff origin/main...HEAD --format json
@@ -94,7 +96,9 @@ Go 语法与结构查询不需要 Go 工具链；语义刷新运行外部 `scip-
 }
 ```
 
-提供 `capabilities`、`index_status`、`repo_map`、`search_symbols`、`symbol_at`、`get_symbol`、`find_references`、`call_graph`、`impact_of`、`context_pack` 10 个只读工具，入参 schema 随 `capabilities` 和 MCP tools/list 返回。信任与重建走 CLI 控制通道。使用官方 Rust SDK rmcp 的 stdio 传输，协议流不包含 daemon 日志。
+提供 `capabilities`、`index_status`、`repo_map`、`search_symbols`、`symbol_at`、`get_symbol`、`find_references`、`find_implementations`、`call_graph`、`impact_of`、`context_pack` 11 个只读工具，入参 schema 随 `capabilities` 和 MCP tools/list 返回。本次 v0.2 增量仅接入 `find_implementations` / `impls`；`verify_change` 尚未接入，其他未来工具仍按路线图推进。信任与重建走 CLI 控制通道。使用官方 Rust SDK rmcp 的 stdio 传输，协议流不包含 daemon 日志。
+
+`impls` 接收 Rust trait 或 trait 方法，`--path` 过滤实现所在路径，并支持关系查询的来源、确定性、新鲜度与通用快照、分页参数。它返回已索引的显式实现，L1 名称候选与 L3 语义证据分开披露，测试作用域单独标注；默认方法继承单独计数。L3 可独立识别 use 别名，只有语义绑定而无语法名称匹配的别名实现不附 L1 name_match 证据，`--source L1` 不返回它。仅 `relations` 分页，过滤后的完整计数、`inherited_defaults` 和 `excluded_candidates` 随每页返回。宏与 derive 生成实现、blanket impl 覆盖类型枚举、未索引的依赖和下游实现仍有缺口；无语义证据时不解析导入和遮蔽，不能把同名候选当作已绑定实现。字段与缺口见[接口契约](docs/interfaces.md#find_implementationsrust-trait-实现查询v02-增量)。
 
 ## 验证与当前边界
 
@@ -123,7 +127,7 @@ Diff 分析先保留两侧唯一的精确匹配，再按双向唯一的语法指
 
 - [底层基础实现](docs/foundations.md)：共享哈希与坐标、受限图遍历、快照查询索引及测量边界
 
-- [接口规格](docs/interfaces.md)：MCP 工具、响应格式与 v0.1 工具契约
+- [接口规格](docs/interfaces.md)：MCP 工具、响应格式与已接入的工具契约
 
 - [路线图、风险与决策](docs/roadmap.md)：版本门槛与待决策事项
 

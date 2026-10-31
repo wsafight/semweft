@@ -584,6 +584,20 @@ fn syntax_publication(epoch: u64) -> Publication {
                 name_span: span,
                 signature: "signature".repeat(30),
             });
+            snapshot.syntax.impls.push(semweft_core::ImplBlock {
+                impl_id: format!("impl:{file}:{index}"),
+                file: file.into(),
+                file_hash: snapshot.manifest.files[file].file_hash.clone(),
+                span,
+                trait_path: "module::Trait".into(),
+                trait_span: span,
+                self_type: "Container<T>".into(),
+                generics: vec!["T".into()],
+                negative: index % 2 == 0,
+                unsafe_impl: index % 3 == 0,
+                test_only: file == "copy.rs",
+                methods: vec![id.clone()],
+            });
             snapshot.syntax.declarations.insert(
                 id.clone(),
                 semweft_core::DeclarationInfo {
@@ -627,7 +641,108 @@ fn syntax_publication(epoch: u64) -> Publication {
         file: None,
         message: "global diagnostic".into(),
     });
+    snapshot.syntax.impls.sort_by(|left, right| {
+        (&left.file, left.span.start, &left.impl_id).cmp(&(
+            &right.file,
+            right.span.start,
+            &right.impl_id,
+        ))
+    });
     item
+}
+
+#[test]
+fn impl_file_shards_round_trip_marker_blocks_and_canonical_order() {
+    let marker = |file: &str, id: &str, line| semweft_core::ImplBlock {
+        impl_id: id.into(),
+        file: file.into(),
+        file_hash: format!("hash:{file}"),
+        span: Span {
+            start: Position { line, column: 1 },
+            end: Position { line, column: 20 },
+        },
+        trait_path: "module::Marker".into(),
+        trait_span: Span {
+            start: Position { line, column: 6 },
+            end: Position { line, column: 12 },
+        },
+        self_type: "S".into(),
+        generics: vec![],
+        negative: file == "b.rs",
+        unsafe_impl: file == "a.rs",
+        test_only: true,
+        methods: vec![],
+    };
+    let facts = SyntaxFacts {
+        impls: vec![
+            marker("b.rs", "b", 1),
+            marker("a.rs", "later", 2),
+            marker("a.rs", "second", 1),
+            marker("a.rs", "first", 1),
+        ],
+        ..Default::default()
+    };
+    let (shards, order) = syntax::split(&facts);
+    assert_eq!(shards.len(), 2);
+    assert_eq!(shards["a.rs"].impls.len(), 3);
+    assert_eq!(shards["b.rs"].impls.len(), 1);
+    let shards = shards
+        .into_iter()
+        .map(|(file, shard)| {
+            assert!(shard.symbols.is_empty());
+            assert!(shard.impls.iter().all(|block| block.file == file));
+            serde_json::from_slice::<SyntaxFacts>(&serde_json::to_vec(&shard).unwrap()).unwrap()
+        })
+        .collect();
+    let restored = syntax::join(shards, order).unwrap();
+    assert_eq!(
+        restored.impls,
+        [
+            marker("a.rs", "first", 1),
+            marker("a.rs", "second", 1),
+            marker("a.rs", "later", 2),
+            marker("b.rs", "b", 1),
+        ]
+    );
+}
+
+#[test]
+fn marker_impl_without_symbols_survives_storage_restart() {
+    let temp = private_tempdir();
+    let text = "impl Marker for S {}";
+    let mut item = publication(1, text);
+    let snapshot = Arc::make_mut(&mut Arc::make_mut(&mut item.view).snapshot);
+    snapshot.syntax.impls.push(semweft_core::ImplBlock {
+        impl_id: "marker".into(),
+        file: "edit.rs".into(),
+        file_hash: snapshot.manifest.files["edit.rs"].file_hash.clone(),
+        span: Span {
+            start: Position { line: 1, column: 1 },
+            end: Position {
+                line: 1,
+                column: text.len() as u32 + 1,
+            },
+        },
+        trait_path: "Marker".into(),
+        trait_span: Span {
+            start: Position { line: 1, column: 6 },
+            end: Position {
+                line: 1,
+                column: 12,
+            },
+        },
+        self_type: "S".into(),
+        generics: vec![],
+        negative: false,
+        unsafe_impl: false,
+        test_only: false,
+        methods: vec![],
+    });
+    assert!(snapshot.syntax.symbols.is_empty());
+    let (mut store, _) = SnapshotStore::open(temp.path(), WORKSPACE).unwrap();
+    assert_eq!(save(&mut store, &item).syntax_files, 1);
+    drop(store);
+    assert_publication(&recovered(temp.path()).publications[0], &item);
 }
 
 #[test]
@@ -636,10 +751,24 @@ fn file_syntax_reuses_unchanged_facts_and_preserves_order_and_all_fields() {
     let (mut store, _) = SnapshotStore::open(temp.path(), WORKSPACE).unwrap();
     let first = syntax_publication(1);
     assert_eq!(save(&mut store, &first).syntax_files, 4);
+    let first_objects = fs::read_dir(temp.path().join("objects/syntax"))
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let bytes = fs::read(&path).unwrap();
+            let modified = fs::metadata(&path).unwrap().modified().unwrap();
+            (path, bytes, modified)
+        })
+        .collect::<Vec<_>>();
     let next = syntax_publication(2);
     let stats = save(&mut store, &next);
     assert_eq!(stats.syntax_files, 1);
     assert!(stats.object_bytes < serde_json::to_vec(&next).unwrap().len() / 2);
+    for (path, bytes, modified) in first_objects {
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    }
+    drop(store);
     for (actual, expected) in recovered(temp.path())
         .publications
         .iter()
@@ -649,7 +778,6 @@ fn file_syntax_reuses_unchanged_facts_and_preserves_order_and_all_fields() {
     }
     drop(first);
     drop(next);
-    drop(store);
     let (mut store, roots) = SnapshotStore::open_lazy(temp.path(), WORKSPACE).unwrap();
     drop(roots);
     assert_eq!(store.gc(1).unwrap().removed_views, 1);
@@ -688,6 +816,45 @@ fn legacy_inline_syntax_snapshot_remains_readable() {
         &serde_json::to_vec(&store.catalog).unwrap(),
     )
     .unwrap();
+    assert_publication(&recovered(temp.path()).publications[0], &item);
+}
+
+#[test]
+fn legacy_syntax_shards_without_impls_remain_readable() {
+    let temp = private_tempdir();
+    let (mut store, _) = SnapshotStore::open(temp.path(), WORKSPACE).unwrap();
+    let mut item = syntax_publication(1);
+    Arc::make_mut(&mut Arc::make_mut(&mut item.view).snapshot)
+        .syntax
+        .impls
+        .clear();
+    save(&mut store, &item);
+    let mut view: ViewObject = store
+        .read_json("views", &store.catalog.views[0].object)
+        .unwrap();
+    let mut snapshot: SnapshotObject = store.read_json("snapshots", &view.snapshot).unwrap();
+    for hash in snapshot.syntax_files.values_mut() {
+        let mut shard: Value = store.read_json("syntax", hash).unwrap();
+        shard.as_object_mut().unwrap().remove("impls");
+        *hash = store
+            .write_object("syntax", &serde_json::to_vec(&shard).unwrap())
+            .unwrap()
+            .0;
+    }
+    view.snapshot = store
+        .write_object("snapshots", &serde_json::to_vec(&snapshot).unwrap())
+        .unwrap()
+        .0;
+    store.catalog.views[0].object = store
+        .write_object("views", &serde_json::to_vec(&view).unwrap())
+        .unwrap()
+        .0;
+    atomic_write(
+        &temp.path().join("views.json"),
+        &serde_json::to_vec(&store.catalog).unwrap(),
+    )
+    .unwrap();
+    drop(store);
     assert_publication(&recovered(temp.path()).publications[0], &item);
 }
 

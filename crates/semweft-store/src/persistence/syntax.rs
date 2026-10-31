@@ -64,6 +64,13 @@ pub(super) fn split(facts: &SyntaxFacts) -> (BTreeMap<String, SyntaxFacts>, Synt
             .skeletons
             .insert(file.clone(), skeleton.clone());
     }
+    for block in &facts.impls {
+        shards
+            .entry(block.file.clone())
+            .or_default()
+            .impls
+            .push(block.clone());
+    }
     for (file, imports) in &facts.imports {
         shards
             .entry(file.clone())
@@ -131,7 +138,11 @@ pub(super) fn join(shards: Vec<SyntaxFacts>, order: SyntaxOrder) -> Result<Synta
         facts.declarations.extend(shard.declarations);
         facts.skeletons.extend(shard.skeletons);
         facts.imports.extend(shard.imports);
+        facts.impls.extend(shard.impls);
     }
+    facts.impls.sort_by(|a, b| {
+        (&a.file, a.span.start, &a.impl_id).cmp(&(&b.file, b.span.start, &b.impl_id))
+    });
     facts.symbols = ordered(symbols, order.symbols)?;
     facts.calls = ordered(calls, order.calls)?;
     facts.occurrences = ordered(occurrences, order.occurrences)?;

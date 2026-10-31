@@ -98,7 +98,7 @@ pub fn capabilities() -> Value {
             {"id":crate::tokens::CL100K,"mode":"exact","method":"offline BPE over complete compact JSON","min_budget":MIN_BUDGET},
             {"id":crate::tokens::O200K,"mode":"exact","method":"offline BPE over complete compact JSON","min_budget":MIN_BUDGET}],
         "limits":{"timeout_ms":5000,"max_timeout_ms":60000,"fresh_wait_ms":2000,"max_fresh_wait_fraction":0.5,"limit":100,"max_limit":1000,"depth":3,"max_depth":10,"max_nodes":100000,"dependency_depth":"nonnegative u32; offline Cargo resolution requires repository trust","snapshot_retention":"unlimited by default; configurable retention with durable pins and safe GC","max_cursors":256,"default_max_cursor_bytes":67108864,"cursor_limits_configurable":true},
-        "unsupported":["verify_change","GUI","IDL","HTTP MCP"],"commands":["benchmark-storage","snapshots pin","snapshots unpin","snapshots gc","snapshots usage","snapshots compact","init","trust","index","doctor","capabilities","status","map","search","symbol-at","symbol","refs","calls","impact","context","mcp","prototype scan","prototype check"]})
+        "unsupported":["verify_change","GUI","IDL","HTTP MCP"],"commands":["benchmark-storage","snapshots pin","snapshots unpin","snapshots gc","snapshots usage","snapshots compact","init","trust","index","doctor","capabilities","status","map","search","symbol-at","symbol","refs","impls","calls","impact","context","mcp","prototype scan","prototype check"]})
 }
 
 fn go_capabilities() -> Value {
@@ -379,7 +379,7 @@ impl QueryService {
                 "relation_changes.added",
                 "relation_changes.removed",
             ],
-            "call_graph" | "impact_of" => vec!["relations"],
+            "call_graph" | "impact_of" | "find_implementations" => vec!["relations"],
             _ => vec![],
         };
         if matches!(tool, "search_symbols" | "repo_map") && Instant::now() >= deadline {
@@ -595,6 +595,9 @@ impl QueryService {
                 );
             }
             "symbol_at" => symbol_at(&mut result, stored, args)?,
+            "find_implementations" => {
+                crate::implementations::find(&mut result, stored, args, deadline)?;
+            }
             "repo_map" => {
                 let computed = crate::structure::repo_map(&mut result, stored, args, deadline);
                 finish_computation(&mut result, args, computed)?;
@@ -1484,6 +1487,221 @@ mod tests {
     use semweft_lang_rust::RustParser;
     use std::time::Duration;
 
+    fn query_service() -> (tempfile::TempDir, QueryService) {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"implementations-query-test\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let config_path = temp.path().join("semweft.toml");
+        std::fs::write(
+            &config_path,
+            "schema_version = \"0.1\"\n[index]\ndirectory = \".semweft/index\"\n",
+        )
+        .unwrap();
+        let resolved = crate::config::resolve(Some(temp.path()), Some(&config_path)).unwrap();
+        let service = QueryService::new(Engine::new(resolved).unwrap());
+        (temp, service)
+    }
+
+    #[test]
+    fn implementation_pages_keep_complete_metadata_and_bind_cursor_arguments() {
+        let (_temp, service) = query_service();
+        let args = json!({"symbol":"Draw::draw","path_prefix":"src","source":["L1"],
+            "certainty":["candidate"],"freshness":["current"],"snapshot_id":"fixed",
+            "semantic_epoch":42,"limit":1});
+        let original = json!({"schema_version":"0.1","snapshot_id":"fixed",
+            "epochs":{"syntax":7,"semantic":42},"output":{"continuation":{}},
+            "target":{"symbol_id":"draw"},"trait":{"symbol_id":"Draw"},"mode":"trait_method",
+            "relations":[{"relation_id":"first"},{"relation_id":"second"},{"relation_id":"third"}],
+            "implementation_counts":{"total":3,"production":2,"test":1,"inherited_defaults":2,"excluded":2},
+            "inherited_defaults":[{"impl_id":"default-first"},{"impl_id":"default-second"}],
+            "excluded_candidates":[{"impl_id":"excluded-first"},{"impl_id":"excluded-second"}],
+            "evidence_summary":{"basis":"complete","exact":true,"total":3},
+            "completeness":{"status":"partial","known_gaps":[{"kind":"external_implementations_not_indexed"}]}});
+        let first = service
+            .page(Page::new(
+                "find_implementations".into(),
+                args,
+                original.clone(),
+                vec!["relations".into()],
+                0,
+            ))
+            .unwrap();
+        let first_cursor = first["output"]["continuation"]["next_cursor"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        for (parameter, value) in [
+            ("symbol", json!("Other::draw")),
+            ("path_prefix", json!("tests")),
+            ("source", json!(["L3"])),
+            ("certainty", json!(["definite"])),
+            ("freshness", json!(["pending"])),
+            ("snapshot_id", json!("different")),
+            ("semantic_epoch", json!(43)),
+            ("limit", json!(2)),
+        ] {
+            let mut changed = json!({"cursor":first_cursor});
+            changed[parameter] = value;
+            let error = service
+                .execute("find_implementations", changed, deadline())
+                .unwrap_err();
+            assert_eq!(code(error), "invalid_argument", "{parameter}");
+        }
+        assert_eq!(
+            code(
+                service
+                    .execute(
+                        "find_references",
+                        json!({"cursor":first_cursor}),
+                        deadline()
+                    )
+                    .unwrap_err()
+            ),
+            "cursor_expired"
+        );
+        let mut response = first;
+        let mut ids = vec![];
+        loop {
+            for field in [
+                "schema_version",
+                "snapshot_id",
+                "epochs",
+                "target",
+                "trait",
+                "mode",
+                "implementation_counts",
+                "inherited_defaults",
+                "excluded_candidates",
+                "evidence_summary",
+                "completeness",
+            ] {
+                assert_eq!(response[field], original[field], "{field}");
+            }
+            let relations = response["relations"].as_array().unwrap();
+            assert_eq!(relations.len(), 1);
+            assert_eq!(response["output"]["returned_relations"], 1);
+            assert_eq!(response["output"]["returned_items"], 1);
+            ids.push(relations[0]["relation_id"].as_str().unwrap().to_owned());
+            assert_eq!(response["output"]["remaining_relations"], 3 - ids.len());
+            assert_eq!(response["output"]["remaining_items"], 3 - ids.len());
+            let Some(cursor) = response["output"]["continuation"]["next_cursor"].as_str() else {
+                break;
+            };
+            response = service
+                .execute(
+                    "find_implementations",
+                    json!({"cursor":cursor,"snapshot_id":"fixed","semantic_epoch":42,
+                        "timeout_ms":1000,"require_fresh":true,"fresh_wait_ms":500}),
+                    deadline(),
+                )
+                .unwrap();
+        }
+        assert_eq!(ids, ["first", "second", "third"]);
+        let replay = service
+            .execute(
+                "find_implementations",
+                json!({"cursor":first_cursor}),
+                deadline(),
+            )
+            .unwrap();
+        assert_eq!(replay["relations"][0]["relation_id"], "second");
+        assert_eq!(replay["epochs"], original["epochs"]);
+        assert_eq!(
+            replay["implementation_counts"],
+            original["implementation_counts"]
+        );
+    }
+
+    #[test]
+    fn implementation_queries_page_a_bound_version_after_new_publications() {
+        let (temp, service) = query_service();
+        std::fs::create_dir(temp.path().join("src")).unwrap();
+        let source = "pub trait Draw {}\npub struct First;\npub struct Second;\nimpl Draw for First {}\nimpl Draw for Second {}\n";
+        let path = temp.path().join("src/lib.rs");
+        std::fs::write(&path, source).unwrap();
+        let view = service.engine.scan(true).unwrap();
+        let args = json!({"symbol":"Draw","path_prefix":"src","source":["L1"],
+            "certainty":["candidate"],"freshness":["current"],"limit":1,
+            "snapshot_id":view.snapshot.snapshot_id,"semantic_epoch":view.epochs.semantic_epoch});
+        let first = service
+            .execute("find_implementations", args.clone(), deadline())
+            .unwrap();
+        assert_eq!(first["snapshot_id"], view.snapshot.snapshot_id);
+        assert_eq!(first["epochs"]["semantic"], view.epochs.semantic_epoch);
+        assert_eq!(first["mode"], "trait");
+        assert_eq!(first["implementation_counts"]["total"], 2);
+        assert_eq!(first["relations"].as_array().unwrap().len(), 1);
+        assert_eq!(first["relations"][0]["kind"], "implements");
+        assert_eq!(first["output"]["returned_relations"], 1);
+        assert_eq!(first["output"]["remaining_relations"], 1);
+        let cursor = first["output"]["continuation"]["next_cursor"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        std::fs::write(
+            &path,
+            format!("{source}pub struct Third;\nimpl Draw for Third {{}}\n"),
+        )
+        .unwrap();
+        let newer = service.engine.scan(true).unwrap();
+        assert_ne!(newer.snapshot.snapshot_id, view.snapshot.snapshot_id);
+        let second = service
+            .execute("find_implementations", json!({"cursor":cursor}), deadline())
+            .unwrap();
+        for field in [
+            "snapshot_id",
+            "epochs",
+            "target",
+            "trait",
+            "mode",
+            "implementation_counts",
+            "inherited_defaults",
+            "excluded_candidates",
+            "evidence_summary",
+            "completeness",
+        ] {
+            assert_eq!(second[field], first[field], "{field}");
+        }
+        assert_eq!(second["relations"].as_array().unwrap().len(), 1);
+        assert_ne!(
+            second["relations"][0]["relation_id"],
+            first["relations"][0]["relation_id"]
+        );
+        assert_eq!(second["output"]["remaining_relations"], 0);
+        assert!(second["output"]["continuation"]["next_cursor"].is_null());
+        let historical = service
+            .execute("find_implementations", args.clone(), deadline())
+            .unwrap();
+        assert_eq!(historical["relations"], first["relations"]);
+        assert_eq!(
+            historical["implementation_counts"],
+            first["implementation_counts"]
+        );
+        let mut unpublished = args.clone();
+        unpublished["semantic_epoch"] = json!(u64::MAX);
+        assert_eq!(
+            code(
+                service
+                    .execute("find_implementations", unpublished, deadline())
+                    .unwrap_err()
+            ),
+            "invalid_argument"
+        );
+        let mut unavailable = args;
+        unavailable["snapshot_id"] = json!("unavailable-snapshot");
+        assert_eq!(
+            code(
+                service
+                    .execute("find_implementations", unavailable, deadline())
+                    .unwrap_err()
+            ),
+            "snapshot_expired"
+        );
+    }
+
     #[test]
     fn cursor_cache_shares_payload_and_enforces_count_bytes_expiry_and_oversized_policy() {
         let result = json!({"snapshot_id":"fixed", "relations":[{"id":1},{"id":2}], "history":{"relations":[{"id":3}]}});
@@ -1778,7 +1996,23 @@ mod tests {
         assert!(calls["properties"]["source"]["items"]["enum"].is_array());
         let impact = tool_schema("impact_of");
         assert!(impact["properties"]["diff"]["required"].is_array());
-        assert_eq!(tools().len(), 10);
+        assert_eq!(tools().len(), 11);
+        let implementations = tool_schema("find_implementations");
+        assert_eq!(implementations["anyOf"][1]["required"], json!(["symbol"]));
+        let advertised = capabilities();
+        assert_eq!(advertised["tools"], json!(tools()));
+        assert!(
+            advertised["commands"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("impls"))
+        );
+        assert!(
+            advertised["unsupported"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("verify_change"))
+        );
     }
 
     #[test]

@@ -596,10 +596,10 @@ impl RefreshCoordinator {
 }
 
 fn validate_syntax(manifest: &Manifest, syntax: &SyntaxFacts) -> Result<(), String> {
-    let mut ids = BTreeSet::new();
+    let mut symbols = BTreeMap::new();
     let mut lines = BTreeMap::new();
     for symbol in &syntax.symbols {
-        if !ids.insert(&symbol.symbol_id) {
+        if symbols.insert(&symbol.symbol_id, symbol).is_some() {
             return Err("duplicate_symbol".into());
         }
         validate_span(
@@ -622,10 +622,54 @@ fn validate_syntax(manifest: &Manifest, syntax: &SyntaxFacts) -> Result<(), Stri
         if !calls.insert(&call.callsite_id) {
             return Err("duplicate_callsite".into());
         }
-        if call.caller_id.as_ref().is_some_and(|id| !ids.contains(id)) {
+        if call
+            .caller_id
+            .as_ref()
+            .is_some_and(|id| !symbols.contains_key(id))
+        {
             return Err("unknown_caller".into());
         }
         validate_span(manifest, &mut lines, &call.file, &call.file_hash, call.span)?;
+    }
+    let mut impls = BTreeSet::new();
+    let mut methods = BTreeSet::new();
+    for block in &syntax.impls {
+        if !impls.insert(&block.impl_id) {
+            return Err("duplicate_impl".into());
+        }
+        validate_span(
+            manifest,
+            &mut lines,
+            &block.file,
+            &block.file_hash,
+            block.span,
+        )?;
+        validate_span(
+            manifest,
+            &mut lines,
+            &block.file,
+            &block.file_hash,
+            block.trait_span,
+        )?;
+        if block.trait_span.start < block.span.start || block.trait_span.end > block.span.end {
+            return Err("invalid_span".into());
+        }
+        for method in &block.methods {
+            if !methods.insert(method) {
+                return Err("duplicate_impl_method".into());
+            }
+            let symbol = symbols.get(method).ok_or("unknown_impl_method")?;
+            if symbol.kind != "function"
+                || symbol.file != block.file
+                || symbol.file_hash != block.file_hash
+                || symbol.span.start < block.span.start
+                || symbol.span.end > block.span.end
+                || symbol.name_span.start < symbol.span.start
+                || symbol.name_span.end > symbol.span.end
+            {
+                return Err("invalid_impl_method".into());
+            }
+        }
     }
     Ok(())
 }

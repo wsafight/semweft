@@ -94,6 +94,10 @@ pub struct SyntaxFacts {
     pub declarations: BTreeMap<String, DeclarationInfo>,
     #[serde(default)]
     pub imports: BTreeMap<String, Vec<String>>,
+    /// Trait implementation blocks (`impl Trait for Type`); inherent impls are
+    /// not recorded. Sorted by file, position and identity.
+    #[serde(default)]
+    pub impls: Vec<ImplBlock>,
 }
 
 impl SyntaxFacts {
@@ -106,7 +110,31 @@ impl SyntaxFacts {
         self.skeletons.extend(other.skeletons.clone());
         self.declarations.extend(other.declarations.clone());
         self.imports.extend(other.imports.clone());
+        self.impls.extend_from_slice(&other.impls);
     }
+}
+
+/// A syntax-level `impl Trait for Type` block. The trait path is the written
+/// text; binding it to a declaration is a query-time name match (L1) unless a
+/// semantic backend supplies a reference at `trait_span`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImplBlock {
+    pub impl_id: String,
+    pub file: String,
+    pub file_hash: String,
+    pub span: Span,
+    /// Written trait path without generic arguments, e.g. `inventory::Deduct`.
+    pub trait_path: String,
+    /// Final identifier of the trait path, the occurrence bound by L3 backends.
+    pub trait_span: Span,
+    pub self_type: String,
+    /// Type parameter names declared on the impl, excluding lifetimes and consts.
+    pub generics: Vec<String>,
+    pub negative: bool,
+    pub unsafe_impl: bool,
+    pub test_only: bool,
+    /// Symbols of methods defined directly in the impl body.
+    pub methods: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

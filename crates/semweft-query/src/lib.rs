@@ -7,6 +7,7 @@ pub mod engine;
 pub mod frontend;
 pub mod git;
 mod go;
+mod implementations;
 pub mod lsp;
 mod process;
 pub mod query;

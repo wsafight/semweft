@@ -17,7 +17,7 @@ pub struct DaemonRequest {
     #[serde(default)]
     pub request_id: Option<String>,
 }
-pub const TOOL_NAMES: [&str; 10] = [
+pub const TOOL_NAMES: [&str; 11] = [
     "capabilities",
     "index_status",
     "repo_map",
@@ -28,6 +28,7 @@ pub const TOOL_NAMES: [&str; 10] = [
     "call_graph",
     "impact_of",
     "context_pack",
+    "find_implementations",
 ];
 pub const MIN_BUDGET: u64 = 4096;
 
@@ -233,7 +234,18 @@ pub fn tool_schema(name: &str) -> Value {
         }
         _ => {}
     }
-    if ["find_references", "call_graph", "impact_of"].contains(&name) {
+    if name == "find_implementations" {
+        required.push("symbol");
+        props.insert("symbol".into(), string());
+    }
+    if [
+        "find_references",
+        "call_graph",
+        "impact_of",
+        "find_implementations",
+    ]
+    .contains(&name)
+    {
         props.extend(Map::from_iter([
             ("path_prefix".into(), string()),
             ("source".into(), array(&["L1", "L2", "L3"])),
@@ -261,6 +273,7 @@ pub fn tools() -> Vec<Value> {
         "Bounded caller/callee graph",
         "Candidate impact of a symbol or explicit diff",
         "Context with a serialized-response budget",
+        "Indexed implementations of a trait or trait method",
     ];
     TOOL_NAMES.iter().zip(descriptions).map(|(name,description)|json!({"name":name,"description":description,"version":"0.1","input_schema":tool_schema(name)})).collect()
 }
@@ -394,4 +407,124 @@ pub fn safe_relative(path: &str) -> Result<PathBuf> {
         bail!("invalid_argument: expected a normalized workspace-relative path");
     }
     Ok(path.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_registry_exposes_implementations_without_verify_change() {
+        let expected = [
+            "capabilities",
+            "index_status",
+            "repo_map",
+            "search_symbols",
+            "symbol_at",
+            "get_symbol",
+            "find_references",
+            "call_graph",
+            "impact_of",
+            "context_pack",
+            "find_implementations",
+        ];
+        assert_eq!(TOOL_NAMES, expected);
+        let registered = tools();
+        assert_eq!(registered.len(), 11);
+        for (tool, name) in registered.iter().zip(expected) {
+            assert_eq!(tool["name"], name);
+            assert_eq!(tool["version"], "0.1");
+            assert!(!tool["description"].as_str().unwrap().is_empty());
+            assert_eq!(tool["input_schema"], tool_schema(name));
+        }
+        let error = validate("verify_change", &json!({})).unwrap_err();
+        assert_eq!(
+            error_value(&error)["error"]["code"],
+            "capability_unsupported"
+        );
+    }
+
+    #[test]
+    fn implementations_schema_requires_symbol_or_cursor_and_shares_filters() {
+        let schema = tool_schema("find_implementations");
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["required"], json!([]));
+        assert_eq!(
+            schema["anyOf"],
+            json!([{"required":["cursor"]},{"required":["symbol"]}])
+        );
+        assert_eq!(schema["properties"]["symbol"], string());
+        let references = tool_schema("find_references");
+        for parameter in [
+            "path_prefix",
+            "source",
+            "certainty",
+            "freshness",
+            "snapshot_id",
+            "semantic_epoch",
+            "require_fresh",
+            "fresh_wait_ms",
+            "timeout_ms",
+            "limit",
+            "cursor",
+        ] {
+            assert_eq!(
+                schema["properties"][parameter], references["properties"][parameter],
+                "{parameter}"
+            );
+            assert!(!schema["properties"][parameter].is_null());
+        }
+        assert!(schema["properties"].get("include_stale").is_none());
+        assert!(schema["properties"].get("stale_from").is_none());
+    }
+
+    #[test]
+    fn implementations_accepts_symbol_filters_versions_and_cursor_only_requests() {
+        for args in [
+            json!({"symbol":"Draw"}),
+            json!({"symbol":"Draw::draw","path_prefix":"."}),
+            json!({"symbol":"Draw","path_prefix":"src","source":["L1","L2","L3"],
+                "certainty":["definite","candidate"],"freshness":["current","pending"],
+                "snapshot_id":"snapshot","semantic_epoch":0,"limit":1,
+                "timeout_ms":1000,"require_fresh":true,"fresh_wait_ms":500}),
+            json!({"cursor":"continuation"}),
+            json!({"cursor":"continuation","timeout_ms":60000}),
+        ] {
+            validate("find_implementations", &args).unwrap();
+        }
+    }
+
+    #[test]
+    fn implementations_rejects_invalid_arguments_and_unsupported_history() {
+        for args in [
+            json!({}),
+            json!({"symbol":""}),
+            json!({"symbol":false}),
+            json!({"symbol":"Draw","unknown":true}),
+            json!({"symbol":"Draw","path_prefix":"../src"}),
+            json!({"symbol":"Draw","path_prefix":"/src"}),
+            json!({"symbol":"Draw","source":"L1"}),
+            json!({"symbol":"Draw","source":["L4"]}),
+            json!({"symbol":"Draw","certainty":["unknown"]}),
+            json!({"symbol":"Draw","freshness":["unknown"]}),
+            json!({"symbol":"Draw","freshness":["stale"]}),
+            json!({"symbol":"Draw","include_stale":true}),
+            json!({"symbol":"Draw","stale_from":{"snapshot_id":"old","semantic_epoch":0}}),
+            json!({"symbol":"Draw","semantic_epoch":0}),
+            json!({"symbol":"Draw","snapshot_id":"snapshot","semantic_epoch":-1}),
+            json!({"symbol":"Draw","timeout_ms":1000,"fresh_wait_ms":501}),
+            json!({"symbol":"Draw","limit":0}),
+            json!({"symbol":"Draw","limit":1001}),
+            json!({"cursor":""}),
+            json!({"cursor":1}),
+            json!({"cursor":"continuation","source":["L4"]}),
+        ] {
+            let error = validate("find_implementations", &args).unwrap_err();
+            assert_eq!(
+                error_value(&error)["error"]["code"],
+                "invalid_argument",
+                "{args}"
+            );
+        }
+    }
 }

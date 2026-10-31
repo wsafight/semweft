@@ -3,7 +3,7 @@ use semweft_core::*;
 use std::collections::BTreeMap;
 use tree_sitter::{InputEdit, Node, Parser, Point, Tree};
 
-pub const PARSER_VERSION: &str = "tree-sitter-rust@0.24;extractor@0.1-p0";
+pub const PARSER_VERSION: &str = "tree-sitter-rust@0.24;extractor@0.2-impls";
 
 pub struct RustParser {
     parser: Parser,
@@ -88,6 +88,9 @@ impl RustParser {
             .sort_by(|a, b| a.callsite_id.cmp(&b.callsite_id));
         facts.diagnostics.sort();
         facts.diagnostics.dedup();
+        facts.impls.sort_by(|a, b| {
+            (&a.file, a.span.start, &a.impl_id).cmp(&(&b.file, b.span.start, &b.impl_id))
+        });
         Ok(facts)
     }
 }
@@ -139,7 +142,11 @@ fn extract(
     }
     let mut nested_scope = scope.to_vec();
     let mut nested_caller = caller.map(str::to_owned);
-    let nested_trait = in_trait || node.kind() == "trait_item";
+    let nested_trait = node.kind() == "trait_item" || (in_trait && node.kind() != "impl_item");
+    let trait_impl = (node.kind() == "impl_item")
+        .then(|| node.child_by_field_name("trait"))
+        .flatten()
+        .map(|trait_node| (trait_node, facts.symbols.len()));
     if node.kind() == "impl_item" {
         let ty = node
             .child_by_field_name("type")
@@ -297,6 +304,87 @@ fn extract(
             nested_trait,
             facts,
         );
+    }
+    if let Some((trait_node, first_symbol)) = trait_impl {
+        let block = impl_block(node, trait_node, path, file, first_symbol, facts);
+        facts.impls.push(block);
+    }
+}
+
+/// Record `impl Trait for Type` with the methods its body declares directly.
+fn impl_block(
+    node: Node<'_>,
+    trait_node: Node<'_>,
+    path: &str,
+    file: &SourceFile,
+    first_symbol: usize,
+    facts: &SyntaxFacts,
+) -> ImplBlock {
+    // `Trait<T>` keeps the written path; `a::Trait` binds at its final segment.
+    let trait_path_node = if trait_node.kind() == "generic_type" {
+        trait_node.child_by_field_name("type").unwrap_or(trait_node)
+    } else {
+        trait_node
+    };
+    let trait_name_node = last_name(trait_path_node);
+    let self_type = node
+        .child_by_field_name("type")
+        .map(|n| source(n, file).to_owned())
+        .unwrap_or_default();
+    let generics =
+        node.child_by_field_name("type_parameters")
+            .map_or_else(Vec::new, |parameters| {
+                let mut cursor = parameters.walk();
+                parameters
+                    .named_children(&mut cursor)
+                    .filter(|parameter| parameter.kind() == "type_parameter")
+                    .filter_map(|parameter| parameter.child_by_field_name("name"))
+                    .map(|name| source(name, file).to_owned())
+                    .collect()
+            });
+    let mut cursor = node.walk();
+    let modifiers: Vec<_> = node
+        .children(&mut cursor)
+        .take_while(|child| child.id() != trait_node.id())
+        .map(|child| child.kind())
+        .collect();
+    let methods = node
+        .child_by_field_name("body")
+        .map_or_else(Vec::new, |body| {
+            let mut cursor = body.walk();
+            body.named_children(&mut cursor)
+                .filter(|child| child.kind() == "function_item")
+                .filter_map(|method| method.child_by_field_name("name"))
+                .filter_map(|name| {
+                    facts.symbols[first_symbol..]
+                        .iter()
+                        .find(|symbol| symbol.kind == "function" && symbol.name_span == span(name))
+                })
+                .map(|symbol| symbol.symbol_id.clone())
+                .collect()
+        });
+    let trait_path = source(trait_path_node, file).to_owned();
+    ImplBlock {
+        impl_id: identity(
+            "impl",
+            &[
+                path,
+                &trait_path,
+                &self_type,
+                &node.start_byte().to_string(),
+            ],
+        ),
+        file: path.into(),
+        file_hash: file.file_hash.clone(),
+        span: span(node),
+        trait_path,
+        trait_span: span(trait_name_node),
+        self_type,
+        generics,
+        negative: modifiers.contains(&"!"),
+        unsafe_impl: modifiers.contains(&"unsafe"),
+        test_only: declaration_info(node, path, file).test_only,
+        methods,
     }
 }
 
@@ -798,6 +886,156 @@ mod tests {
     }
 
     #[test]
+    fn trait_impl_blocks_record_paths_generics_methods_and_scope() {
+        let text = "trait T { fn m(&self); fn d(&self) {} }\nstruct S;\nimpl S { fn own(&self) {} }\nimpl T for S { fn m(&self) { fn nested() {} } }\nimpl<'a, U: Clone> a::b::G<u8> for Vec<U> {}\nunsafe impl Send for S {}\nimpl !Sync for S {}\n#[cfg(test)]\nmod tests { impl super::T for super::S { fn m(&self) {} } }\n";
+        let facts = RustParser::new().unwrap().analyze(&manifest(text)).unwrap();
+        let paths: Vec<_> = facts.impls.iter().map(|b| b.trait_path.as_str()).collect();
+        assert_eq!(paths, ["T", "a::b::G", "Send", "Sync", "super::T"]);
+        let plain = &facts.impls[0];
+        assert_eq!(plain.self_type, "S");
+        assert_eq!(span_text(text, plain.trait_span), "T");
+        assert_eq!(
+            plain.methods.len(),
+            1,
+            "nested functions are not impl methods"
+        );
+        let method = facts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.symbol_id == plain.methods[0])
+            .unwrap();
+        assert_eq!(method.qualified_name, "src/lib.rs::<T for S>::m");
+        assert!(!plain.test_only && !plain.negative && !plain.unsafe_impl);
+        let generic = &facts.impls[1];
+        assert_eq!(span_text(text, generic.trait_span), "G");
+        assert_eq!(generic.generics, ["U"]);
+        assert_eq!(generic.self_type, "Vec<U>");
+        assert!(facts.impls[2].unsafe_impl);
+        assert!(facts.impls[3].negative);
+        assert!(facts.impls[4].test_only);
+        assert_eq!(span_text(text, facts.impls[4].trait_span), "T");
+    }
+
+    #[test]
+    fn trait_impls_keep_empty_marker_negative_and_unsafe_blocks() {
+        let text = "impl Marker for S {}\nimpl S {}\nunsafe /* before impl */ impl /* header */ Send for S {}\nimpl ! /* negative */ Sync for S {}\nunsafe impl ! /* negative */ UnwindSafe for S {}\n";
+        let input = manifest(text);
+        let facts = RustParser::new().unwrap().analyze(&input).unwrap();
+        assert!(facts.symbols.is_empty());
+        assert!(facts.diagnostics.is_empty());
+        assert_eq!(facts.impls.len(), 4);
+        for block in &facts.impls {
+            assert!(block.methods.is_empty());
+            assert_eq!(block.file_hash, input.files["src/lib.rs"].file_hash);
+            assert_eq!(span_text(text, block.trait_span), block.trait_path);
+            assert!(span_text(text, block.span).ends_with("{}"));
+        }
+        assert!(!facts.impls[0].negative && !facts.impls[0].unsafe_impl);
+        assert!(!facts.impls[1].negative && facts.impls[1].unsafe_impl);
+        assert!(facts.impls[2].negative && !facts.impls[2].unsafe_impl);
+        assert!(facts.impls[3].negative && facts.impls[3].unsafe_impl);
+        RefreshCoordinator::default()
+            .publish_inputs(input, facts)
+            .unwrap();
+    }
+
+    #[test]
+    fn trait_impls_preserve_generic_paths_self_types_and_only_direct_methods() {
+        let text = r#"
+impl<'a, T: Clone, U, const N: usize> crate::api::Trait<'a, Vec<U>, N>
+    for &'a mut Container<T, U, N> where U: Copy
+{
+    type Item = U;
+    const SIZE: usize = { fn helper() {} 0 };
+    fn first(&self) {
+        fn nested() {}
+        struct Local;
+        impl Other for Local { fn local(&self) {} }
+    }
+    fn second(&mut self) {}
+}
+"#;
+        let input = manifest(text);
+        let facts = RustParser::new().unwrap().analyze(&input).unwrap();
+        assert!(facts.diagnostics.is_empty());
+        assert_eq!(facts.impls.len(), 2);
+        let outer = &facts.impls[0];
+        assert_eq!(outer.trait_path, "crate::api::Trait");
+        assert_eq!(span_text(text, outer.trait_span), "Trait");
+        assert_eq!(outer.self_type, "&'a mut Container<T, U, N>");
+        assert_eq!(outer.generics, ["T", "U"]);
+        let names = |block: &ImplBlock| {
+            block
+                .methods
+                .iter()
+                .map(|id| {
+                    facts
+                        .symbols
+                        .iter()
+                        .find(|symbol| &symbol.symbol_id == id)
+                        .unwrap()
+                        .name
+                        .as_str()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(outer), ["first", "second"]);
+        assert_eq!(facts.impls[1].trait_path, "Other");
+        assert_eq!(names(&facts.impls[1]), ["local"]);
+        RefreshCoordinator::default()
+            .publish_inputs(input, facts)
+            .unwrap();
+    }
+
+    #[test]
+    fn trait_impls_inherit_test_scope_from_attributes_ancestors_and_paths() {
+        let text = r#"
+impl Production for S {}
+#[cfg(test)]
+impl Direct for S {}
+#[cfg(all(test, feature = "checks"))]
+mod checks { impl super::Nested for super::S {} }
+#[test]
+fn case() { impl Local for S {} }
+#[cfg(not(test))]
+impl NonTest for S {}
+"#;
+        let mut input = manifest(text);
+        let facts = RustParser::new().unwrap().analyze(&input).unwrap();
+        assert!(facts.diagnostics.is_empty());
+        let scopes: Vec<_> = facts.impls.iter().map(|block| block.test_only).collect();
+        assert_eq!(scopes, [false, true, true, true, false]);
+        input.files = BTreeMap::from([("tests/marker.rs".into(), SourceFile::new(text))]);
+        let facts = RustParser::new().unwrap().analyze(&input).unwrap();
+        assert!(facts.impls.iter().all(|block| block.test_only));
+        RefreshCoordinator::default()
+            .publish_inputs(input, facts)
+            .unwrap();
+    }
+
+    #[test]
+    fn trait_impl_methods_inside_default_methods_are_functions() {
+        let text =
+            "trait Host { fn factory() { struct S; impl Inner for S { fn run(&self) {} } } }";
+        let input = manifest(text);
+        let facts = RustParser::new().unwrap().analyze(&input).unwrap();
+        assert!(facts.diagnostics.is_empty());
+        assert_eq!(facts.impls.len(), 1);
+        let block = &facts.impls[0];
+        assert_eq!(block.methods.len(), 1);
+        let method = facts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.symbol_id == block.methods[0])
+            .unwrap();
+        assert_eq!(method.kind, "function");
+        assert_eq!(method.name, "run");
+        RefreshCoordinator::default()
+            .publish_inputs(input, facts)
+            .unwrap();
+    }
+
+    #[test]
     fn skeleton_handles_comments_neutral_attributes_and_nested_items() {
         let hash = |text: &str| {
             RustParser::new()
@@ -837,7 +1075,7 @@ mod fact_cache_tests {
     use super::*;
     #[test]
     fn cached_file_facts_equal_cold_rebuild_after_edits_and_removal() {
-        let source = "/// Docs.\npub fn a() { b(); }\npub fn b() {}\n";
+        let source = "/// Docs.\npub fn a() { b(); }\npub fn b() {}\ntrait T { fn m(&self); }\nstruct S;\nimpl T for S { fn m(&self) { b(); } }\nimpl Marker for S {}\n";
         let mut manifest = Manifest {
             workspace_id: "facts-cache".into(),
             files: BTreeMap::from([
@@ -851,15 +1089,29 @@ mod fact_cache_tests {
         let mut parser = RustParser::new().unwrap();
         let first = parser.analyze(&manifest).unwrap();
         assert_eq!(parser.files_extracted, 2);
+        assert_eq!(first.impls.len(), 4);
         assert_eq!(parser.analyze(&manifest).unwrap(), first);
         assert_eq!(parser.files_extracted, 0);
         manifest.files.insert(
             "a.rs".into(),
             SourceFile::new(source.replace("b()", "changed()")),
         );
+        let changed = parser.analyze(&manifest).unwrap();
         assert_eq!(
-            parser.analyze(&manifest).unwrap(),
+            changed,
             RustParser::new().unwrap().analyze(&manifest).unwrap()
+        );
+        assert_eq!(
+            changed
+                .impls
+                .iter()
+                .filter(|block| block.file == "b.rs")
+                .collect::<Vec<_>>(),
+            first
+                .impls
+                .iter()
+                .filter(|block| block.file == "b.rs")
+                .collect::<Vec<_>>()
         );
         assert_eq!(parser.files_extracted, 1);
         let moved = manifest.files.remove("b.rs").unwrap();
@@ -875,5 +1127,6 @@ mod fact_cache_tests {
             RustParser::new().unwrap().analyze(&manifest).unwrap()
         );
         assert_eq!(parser.files_extracted, 0);
+        assert_eq!(parser.analyze(&manifest).unwrap().impls.len(), 2);
     }
 }

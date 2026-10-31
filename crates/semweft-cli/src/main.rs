@@ -155,6 +155,12 @@ enum Command {
         #[arg(long)]
         stale_semantic_epoch: Option<u64>,
     },
+    /// Indexed implementations of a Rust trait or trait method.
+    Impls {
+        symbol: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
+    },
     Calls {
         symbol: Option<String>,
         #[arg(long)]
@@ -553,6 +559,11 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             }
             "find_references"
         }
+        Command::Impls { symbol, path } => {
+            put(&mut args, "symbol", symbol.as_ref());
+            put(&mut args, "path_prefix", path.as_ref());
+            "find_implementations"
+        }
         Command::Calls {
             symbol,
             path,
@@ -672,7 +683,66 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_budget;
+    use super::*;
+
+    #[test]
+    fn impls_parses_path_filters_and_common_arguments() {
+        let cli = Cli::try_parse_from([
+            "semweft",
+            "impls",
+            "Deduct::name",
+            "--path",
+            "src/production.rs",
+            "--source",
+            "L1,L3",
+            "--certainty",
+            "candidate",
+            "--freshness",
+            "current",
+            "--snapshot-id",
+            "snap_impls",
+            "--semantic-epoch",
+            "3",
+            "--require-fresh",
+            "--fresh-wait-ms",
+            "200",
+            "--timeout-ms",
+            "1000",
+            "--limit",
+            "1",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            &cli.command,
+            Command::Impls { symbol: Some(symbol), path: Some(path) }
+                if symbol == "Deduct::name" && path == "src/production.rs"
+        ));
+        assert_eq!(
+            common(&cli, false),
+            json!({"snapshot_id":"snap_impls","semantic_epoch":3,"require_fresh":true,
+                "fresh_wait_ms":200,"timeout_ms":1000,"limit":1,"source":["L1","L3"],
+                "certainty":["candidate"],"freshness":["current"]})
+        );
+        assert!(matches!(cli.format, Some(Format::Json)));
+    }
+
+    #[test]
+    fn impls_cursor_parses_without_a_symbol_or_filter_defaults() {
+        let cli = Cli::try_parse_from(["semweft", "impls", "--cursor", "impls_page"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Impls {
+                symbol: None,
+                path: None
+            }
+        ));
+        assert_eq!(
+            common(&cli, false),
+            json!({"timeout_ms":5000,"cursor":"impls_page"})
+        );
+    }
 
     #[test]
     fn budget_parsing_accepts_k_suffixes_and_rejects_invalid_values() {

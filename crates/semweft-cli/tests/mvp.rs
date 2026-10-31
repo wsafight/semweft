@@ -2,6 +2,7 @@ use serde_json::{Value, json};
 #[path = "support/p0.rs"]
 mod p0;
 use std::{
+    collections::BTreeSet,
     fs,
     io::{BufRead, BufReader, Write},
     path::PathBuf,
@@ -46,6 +47,59 @@ impl Workspace {
         .unwrap();
         fs::write(root.join("src/lib.rs"), SOURCE).unwrap();
         Self { temp, root }
+    }
+    fn implementations() -> Self {
+        let ws = Self::new();
+        fs::write(
+            ws.root.join("src/lib.rs"),
+            r#"pub trait Deduct {
+    fn deduct(&self) -> i32;
+    fn name(&self) -> &'static str { "default" }
+}
+pub trait Empty {}
+pub struct Stock;
+impl Deduct for Stock {
+    fn deduct(&self) -> i32 { 1 }
+}
+pub mod production;
+#[cfg(test)]
+mod tests {
+    struct Fake;
+    impl super::Deduct for Fake {
+        fn deduct(&self) -> i32 { 0 }
+    }
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            ws.root.join("src/production.rs"),
+            r#"use crate::Deduct;
+pub struct Other;
+impl crate::Deduct for Other {
+    fn deduct(&self) -> i32 { 2 }
+    fn name(&self) -> &'static str { "other" }
+}
+impl<T> Deduct for T {
+    fn deduct(&self) -> i32 { 3 }
+    fn name(&self) -> &'static str { "generic" }
+}
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(ws.root.join("tests")).unwrap();
+        fs::write(
+            ws.root.join("tests/impls.rs"),
+            r#"use shop::Deduct;
+struct Integration;
+impl Deduct for Integration {
+    fn deduct(&self) -> i32 { 4 }
+    fn name(&self) -> &'static str { "integration" }
+}
+"#,
+        )
+        .unwrap();
+        ws
     }
     fn command(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_semweft"));
@@ -115,6 +169,310 @@ impl Workspace {
 impl Drop for Workspace {
     fn drop(&mut self) {
         let _ = self.command().arg("__stop").output();
+    }
+}
+
+#[test]
+fn impls_traits_and_methods_report_scope_counts_and_inherited_defaults() {
+    let ws = Workspace::implementations();
+    let result = ws.ok(&["impls", "Deduct", "--format", "json"]);
+    assert_eq!(result["mode"], "trait");
+    assert_eq!(result["target"]["kind"], "trait");
+    assert_eq!(result["target"]["symbol_id"], result["trait"]["symbol_id"]);
+    assert_eq!(
+        result["implementation_counts"],
+        json!({"total":5,"production":3,"test":2,"with_semantic_evidence":0,
+            "blanket":1,"inherited_defaults":0,"excluded":0})
+    );
+    let relations = result["relations"].as_array().unwrap();
+    assert_eq!(relations.len(), 5);
+    assert!(relations.iter().all(|relation| {
+        relation["kind"] == "implements"
+            && relation["certainty"] == "candidate"
+            && relation["freshness"] == "current"
+            && relation["evidence"][0]["source"] == "L1"
+            && relation["evidence"][0]["derivation"]
+                .as_str()
+                .unwrap()
+                .starts_with("syntax_impl_header+name_match")
+            && relation["to"] == result["trait"]["symbol_id"]
+    }));
+    assert_eq!(
+        relations
+            .iter()
+            .filter(|relation| relation["scope"] == "test")
+            .count(),
+        2
+    );
+    for (self_type, scope) in [
+        ("Stock", "production"),
+        ("Other", "production"),
+        ("Fake", "test"),
+        ("Integration", "test"),
+    ] {
+        assert!(relations.iter().any(|relation| {
+            relation["implementation"]["self_type"] == self_type && relation["scope"] == scope
+        }));
+    }
+    assert_eq!(
+        relations
+            .iter()
+            .filter(|relation| relation["implementation"]["blanket"] == true)
+            .count(),
+        1
+    );
+    assert_eq!(result["inherited_defaults"], json!([]));
+    assert_eq!(result["excluded_candidates"], json!([]));
+    for kind in [
+        "external_implementations_not_indexed",
+        "generated_impls_not_extracted",
+        "blanket_impl_coverage_unknown",
+        "implementation_semantic_evidence_missing",
+    ] {
+        assert!(
+            result["completeness"]["known_gaps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|gap| gap["kind"] == kind)
+        );
+    }
+
+    let required = ws.ok(&["impls", "Deduct::deduct"]);
+    assert_eq!(required["mode"], "trait_method");
+    assert_eq!(required["target"]["kind"], "trait_method");
+    assert_eq!(required["relations"].as_array().unwrap().len(), 5);
+    assert_eq!(
+        required["implementation_counts"],
+        result["implementation_counts"]
+    );
+    assert_eq!(required["inherited_defaults"], json!([]));
+    assert!(
+        required["relations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|relation| {
+                relation["from_name"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("::deduct")
+                    && relation["to"] == required["target"]["symbol_id"]
+            })
+    );
+
+    let defaults = ws.ok(&["impls", "Deduct::name"]);
+    assert_eq!(defaults["mode"], "trait_method");
+    assert_eq!(defaults["relations"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        defaults["implementation_counts"],
+        json!({"total":3,"production":2,"test":1,"with_semantic_evidence":0,
+            "blanket":1,"inherited_defaults":2,"excluded":0})
+    );
+    let inherited = defaults["inherited_defaults"].as_array().unwrap();
+    assert_eq!(inherited.len(), 2);
+    assert!(
+        inherited
+            .iter()
+            .any(|entry| entry["self_type"] == "Stock" && entry["scope"] == "production")
+    );
+    assert!(
+        inherited
+            .iter()
+            .any(|entry| entry["self_type"] == "Fake" && entry["scope"] == "test")
+    );
+    assert!(
+        defaults["relations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|relation| {
+                !inherited
+                    .iter()
+                    .any(|entry| entry["impl_id"] == relation["implementation"]["impl_id"])
+            })
+    );
+}
+
+#[test]
+fn impls_filters_apply_to_relations_counts_and_default_metadata() {
+    let ws = Workspace::implementations();
+    let full = ws.ok(&["impls", "Deduct"]);
+    let filtered = ws.ok(&[
+        "impls",
+        "Deduct",
+        "--path",
+        "src/production.rs",
+        "--source",
+        "L1,L3",
+        "--certainty",
+        "candidate",
+        "--freshness",
+        "current",
+        "--snapshot-id",
+        full["snapshot_id"].as_str().unwrap(),
+        "--semantic-epoch",
+        "0",
+    ]);
+    assert_eq!(filtered["snapshot_id"], full["snapshot_id"]);
+    assert_eq!(
+        filtered["implementation_counts"],
+        json!({"total":2,"production":2,"test":0,"with_semantic_evidence":0,
+            "blanket":1,"inherited_defaults":0,"excluded":0})
+    );
+    assert_eq!(filtered["relations"].as_array().unwrap().len(), 2);
+    assert!(
+        filtered["relations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|relation| {
+                relation["location"]["file"] == "src/production.rs"
+                    && relation["evidence"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|evidence| evidence["source"] == "L1")
+            })
+    );
+    let tests = ws.ok(&["impls", "Deduct", "--path", "tests"]);
+    assert_eq!(tests["implementation_counts"]["total"], 1);
+    assert_eq!(tests["implementation_counts"]["test"], 1);
+    assert_eq!(
+        tests["relations"][0]["implementation"]["self_type"],
+        "Integration"
+    );
+    let inherited = ws.ok(&[
+        "impls",
+        "Deduct::name",
+        "--path",
+        "src/lib.rs",
+        "--source",
+        "L1",
+        "--certainty",
+        "candidate",
+        "--freshness",
+        "current",
+    ]);
+    assert_eq!(inherited["relations"], json!([]));
+    assert_eq!(inherited["implementation_counts"]["total"], 0);
+    assert_eq!(inherited["implementation_counts"]["inherited_defaults"], 2);
+    assert_eq!(inherited["inherited_defaults"].as_array().unwrap().len(), 2);
+    let overrides = ws.ok(&["impls", "Deduct::name", "--path", "src/production.rs"]);
+    assert_eq!(overrides["implementation_counts"]["total"], 2);
+    assert_eq!(overrides["inherited_defaults"], json!([]));
+
+    for (flag, value) in [
+        ("--path", "src/missing"),
+        ("--source", "L2"),
+        ("--source", "L3"),
+        ("--certainty", "definite"),
+        ("--freshness", "pending"),
+    ] {
+        let empty = ws.ok(&["impls", "Deduct::name", flag, value]);
+        assert_eq!(empty["relations"], json!([]), "{flag} {value}: {empty}");
+        assert_eq!(
+            empty["inherited_defaults"],
+            json!([]),
+            "{flag} {value}: {empty}"
+        );
+        assert_eq!(empty["excluded_candidates"], json!([]));
+        assert_eq!(
+            empty["implementation_counts"],
+            json!({"total":0,"production":0,"test":0,"with_semantic_evidence":0,
+                "blanket":0,"inherited_defaults":0,"excluded":0}),
+            "{flag} {value}: {empty}"
+        );
+    }
+    for (flag, value) in [
+        ("--source", "L4"),
+        ("--certainty", "certain"),
+        ("--freshness", "fresh"),
+        ("--freshness", "stale"),
+    ] {
+        let (code, error) = ws.run(&["impls", "Deduct", flag, value]);
+        assert_eq!(code, 2);
+        assert_eq!(error["error"]["code"], "invalid_argument");
+    }
+}
+
+#[test]
+fn impls_empty_traits_succeed_and_non_trait_targets_exit_two() {
+    let ws = Workspace::implementations();
+    let result = ws.ok(&["impls", "Empty"]);
+    assert_eq!(result["mode"], "trait");
+    assert_eq!(result["relations"], json!([]));
+    assert_eq!(result["inherited_defaults"], json!([]));
+    assert_eq!(result["excluded_candidates"], json!([]));
+    assert_eq!(
+        result["implementation_counts"],
+        json!({"total":0,"production":0,"test":0,"with_semantic_evidence":0,
+            "blanket":0,"inherited_defaults":0,"excluded":0})
+    );
+    let (code, error) = ws.run(&["impls", "Stock"]);
+    assert_eq!(code, 2);
+    assert_eq!(error["error"]["code"], "invalid_argument");
+    let (code, error) = ws.run(&["impls"]);
+    assert_eq!(code, 2);
+    assert_eq!(error["error"]["code"], "invalid_argument");
+}
+
+#[test]
+fn impls_pagination_keeps_the_snapshot_metadata_and_all_relations() {
+    for (symbol, expected) in [("Deduct", 5), ("Deduct::name", 3)] {
+        let ws = Workspace::implementations();
+        let complete = ws.ok(&["impls", symbol]);
+        let mut page = ws.ok(&[
+            "impls",
+            symbol,
+            "--limit",
+            "1",
+            "--snapshot-id",
+            complete["snapshot_id"].as_str().unwrap(),
+            "--semantic-epoch",
+            "0",
+        ]);
+        let original = fs::read_to_string(ws.root.join("src/lib.rs")).unwrap();
+        fs::write(ws.root.join("src/lib.rs"), format!("{original}\npub struct Added;\nimpl Deduct for Added {{\n    fn deduct(&self) -> i32 {{ 5 }}\n    fn name(&self) -> &'static str {{ \"added\" }}\n}}\n")).unwrap();
+        let mut seen = BTreeSet::new();
+        let mut pages = 0;
+        loop {
+            assert_eq!(page["snapshot_id"], complete["snapshot_id"]);
+            assert_eq!(page["epochs"], complete["epochs"]);
+            for field in [
+                "implementation_counts",
+                "inherited_defaults",
+                "excluded_candidates",
+            ] {
+                assert_eq!(page[field], complete[field], "{symbol}: {field}");
+            }
+            let relations = page["relations"].as_array().unwrap();
+            assert_eq!(relations.len(), 1, "{page}");
+            assert!(
+                seen.insert(relations[0]["relation_id"].as_str().unwrap().to_owned()),
+                "duplicate: {page}"
+            );
+            pages += 1;
+            assert!(pages <= expected, "pagination did not finish: {page}");
+            let Some(cursor) = page["output"]["continuation"]["next_cursor"].as_str() else {
+                assert_eq!(page["output"]["truncated"], false);
+                break;
+            };
+            assert_eq!(page["output"]["truncated"], true);
+            assert_eq!(page["output"]["remaining_relations"], expected - pages);
+            page = ws.ok(&["impls", "--cursor", cursor]);
+        }
+        assert_eq!(pages, expected);
+        let expected_ids: BTreeSet<_> = complete["relations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|relation| relation["relation_id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(seen, expected_ids, "{symbol}: missed relations");
+        let latest = ws.ok(&["impls", symbol]);
+        assert_ne!(latest["snapshot_id"], complete["snapshot_id"]);
+        assert_eq!(latest["implementation_counts"]["total"], expected + 1);
     }
 }
 
@@ -958,7 +1316,7 @@ while True:
 }
 
 #[test]
-fn mcp_exposes_ten_tools_and_queries_the_same_daemon() {
+fn mcp_exposes_eleven_tools_with_implementation_schema_and_queries_the_same_daemon() {
     let ws = Workspace::new();
     let mut client = Mcp::new(&ws);
     client.send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"mvp-test","version":"1"}}}));
@@ -966,7 +1324,66 @@ fn mcp_exposes_ten_tools_and_queries_the_same_daemon() {
     client.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
     client.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
     let tools = client.reply();
-    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 10);
+    let tools = tools["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 11);
+    let names: BTreeSet<_> = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        BTreeSet::from([
+            "capabilities",
+            "index_status",
+            "repo_map",
+            "search_symbols",
+            "symbol_at",
+            "get_symbol",
+            "find_references",
+            "find_implementations",
+            "call_graph",
+            "impact_of",
+            "context_pack",
+        ])
+    );
+    let implementations = tools
+        .iter()
+        .find(|tool| tool["name"] == "find_implementations")
+        .unwrap();
+    assert!(!implementations["description"].as_str().unwrap().is_empty());
+    let schema = &implementations["inputSchema"];
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["additionalProperties"], false);
+    assert_eq!(schema["required"], json!([]));
+    for required in [json!(["symbol"]), json!(["cursor"])] {
+        assert!(
+            schema["anyOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|alternative| alternative["required"] == required)
+        );
+    }
+    for property in ["symbol", "cursor", "path_prefix", "snapshot_id"] {
+        assert_eq!(
+            schema["properties"][property]["type"], "string",
+            "{property}"
+        );
+    }
+    for (property, values) in [
+        ("source", json!(["L1", "L2", "L3"])),
+        ("certainty", json!(["definite", "candidate"])),
+        ("freshness", json!(["current", "pending", "stale"])),
+    ] {
+        assert_eq!(schema["properties"][property]["type"], "array");
+        assert_eq!(schema["properties"][property]["items"]["enum"], values);
+    }
+    assert_eq!(schema["properties"]["limit"]["minimum"], 1);
+    assert_eq!(schema["properties"]["limit"]["maximum"], 1000);
+    assert_eq!(schema["properties"]["semantic_epoch"]["type"], "integer");
+    assert_eq!(schema["properties"]["require_fresh"]["type"], "boolean");
+    assert_eq!(schema["properties"]["fresh_wait_ms"]["type"], "integer");
+    assert_eq!(schema["properties"]["timeout_ms"]["type"], "integer");
     assert!(ws.ok(&["status"])["snapshot_id"].is_null());
     client.send(json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"index","arguments":{}}}));
     assert_eq!(
@@ -1001,6 +1418,75 @@ fn mcp_exposes_ten_tools_and_queries_the_same_daemon() {
         std::thread::sleep(Duration::from_millis(50));
     }
     drop(client);
+}
+
+#[test]
+fn mcp_find_implementations_calls_match_cli_and_continue_without_a_symbol() {
+    let ws = Workspace::implementations();
+    let mut client = Mcp::new(&ws);
+    client.send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"impls-test","version":"1"}}}));
+    assert!(client.reply().get("result").is_some());
+    client.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    client.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"find_implementations","arguments":{"symbol":"Deduct","limit":1}}}));
+    let reply = client.reply();
+    assert_eq!(reply["id"], 2);
+    assert_ne!(reply["result"]["isError"], true, "{reply}");
+    let first = &reply["result"]["structuredContent"];
+    assert_eq!(first["mode"], "trait");
+    assert_eq!(first["relations"].as_array().unwrap().len(), 1);
+    let cli = ws.ok(&[
+        "impls",
+        "Deduct",
+        "--limit",
+        "1",
+        "--snapshot-id",
+        first["snapshot_id"].as_str().unwrap(),
+        "--semantic-epoch",
+        "0",
+    ]);
+    for field in [
+        "relations",
+        "implementation_counts",
+        "inherited_defaults",
+        "excluded_candidates",
+    ] {
+        assert_eq!(first[field], cli[field], "{field}");
+    }
+    assert_eq!(first["implementation_counts"]["total"], 5);
+    client.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"find_implementations","arguments":{"cursor":first["output"]["continuation"]["next_cursor"]}}}));
+    let reply = client.reply();
+    assert_ne!(reply["result"]["isError"], true, "{reply}");
+    let next = &reply["result"]["structuredContent"];
+    assert_eq!(next["snapshot_id"], first["snapshot_id"]);
+    assert_eq!(next["epochs"], first["epochs"]);
+    assert_eq!(next["relations"].as_array().unwrap().len(), 1);
+    assert_ne!(
+        next["relations"][0]["relation_id"],
+        first["relations"][0]["relation_id"]
+    );
+    for field in [
+        "implementation_counts",
+        "inherited_defaults",
+        "excluded_candidates",
+    ] {
+        assert_eq!(next[field], first[field], "{field}");
+    }
+    client.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"find_implementations","arguments":{"symbol":"Deduct::name","path_prefix":"src/lib.rs","source":["L1"],"certainty":["candidate"],"freshness":["current"],"snapshot_id":first["snapshot_id"],"semantic_epoch":0}}}));
+    let reply = client.reply();
+    assert_ne!(reply["result"]["isError"], true, "{reply}");
+    let defaults = &reply["result"]["structuredContent"];
+    assert_eq!(defaults["mode"], "trait_method");
+    assert_eq!(defaults["relations"], json!([]));
+    assert_eq!(defaults["implementation_counts"]["total"], 0);
+    assert_eq!(defaults["implementation_counts"]["inherited_defaults"], 2);
+    assert_eq!(defaults["inherited_defaults"].as_array().unwrap().len(), 2);
+    client.send(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"find_implementations","arguments":{"symbol":"Stock"}}}));
+    let reply = client.reply();
+    assert_eq!(reply["result"]["isError"], true);
+    assert_eq!(
+        reply["result"]["structuredContent"]["error"]["code"],
+        "invalid_argument"
+    );
 }
 
 #[test]

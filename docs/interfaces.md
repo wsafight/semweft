@@ -28,6 +28,8 @@ Agent 通过 MCP 调用 Semweft。事实查询工具返回结构化 JSON，统�
 |contract_impact|已建模 IDL 变更的代码影响；发布建议后续增加|v0.4|
 |query|结构化高级图查询，语法待定|后续|
 
+上表同时列出已接入与未来规划。当前注册 11 个只读工具：v0.1 的 10 个工具加 `find_implementations`。本次 v0.2 增量只接入 `find_implementations` / `impls`，`verify_change`、`find_paths` 及其他未来工具尚未接入；不能根据“首个版本”列推断整版能力已交付。
+
 ### 1.1 响应示例
 
 下例为 impact_of 的示意响应，不是基准结果。
@@ -130,7 +132,7 @@ evidence_summary.basis 说明统计覆盖的范围：complete 表示结果集已
 
 多种原因同时出现时，truncation_reason 取对统计精度影响最大者（timeout、node_limit 优先于 depth_limit，再优先于 page_limit），continuation 可同时带 next_cursor 与 resume_cursor。截断只体现在 output，不改变 completeness.status。
 
-### 1.3 v0.1 工具契约
+### 1.3 已接入的工具契约
 
 以下数值为初始默认值，原型测量后调整，正式值以 JSON Schema 与能力清单为准。
 
@@ -159,11 +161,59 @@ evidence_summary.basis 说明统计覆盖的范围：complete 表示结果集已
 |symbol_at|file、line、column|file_hash（可选，调用方预期的文件内容哈希）|occurrence、enclosing_symbol_id、symbols（目标符号与 certainty、evidence），见下文|file_not_found；file_hash 不匹配为 content_mismatch；越界或非 UTF-8 码点边界为 invalid_argument|
 |get_symbol|symbol（symbol_id 或限定名）|include_body（false）、include_docs（true）|签名、文档、可见性、所属模块、位置与 file_hash|symbol_not_found；名称对应多个符号时返回 ambiguous_symbol，details 列出候选|
 |find_references|symbol|kinds（全部：read、write、call、type、import）、include_stale（false）、stale_from（固定 snapshot_id 与 semantic_epoch）|relations 按 kind 分组，含未解析项；显式请求时另带 history|同 get_symbol；历史视图回收为 snapshot_expired|
+|find_implementations|symbol（Rust trait 或 trait_method）|path_prefix（工作区根）、source（全部）、certainty（全部）、freshness（current、pending）及事实查询通用参数|target、trait、mode、implementation_counts、inherited_defaults、excluded_candidates、relations（含 implementation），见下文|同 get_symbol；其他目标 kind 为 invalid_argument；不支持历史证据扩展|
 |call_graph|symbol|direction（callers，另有 callees、both）、depth（3，上限 10）、max_nodes（1,000）|nodes、relations、frontier|depth_limit、node_limit 截断见 1.2 节|
 |impact_of|symbol 或 diff，二选一|diff 取 base、head（选择器见 1.4 节）、depth（3）、max_nodes（1,000）|summary、changes、snapshots（diff 模式）、relations 与证据路径|两者都传或都不传为 invalid_argument；base 侧无语义索引时降级并列入 known_gaps|
 |context_pack|budget，以及 symbol 或 task 二选一|tokenizer（使用工作区配置，默认 estimated）、include（定义、调用方签名、被调方签名、相关类型、测试、配置）|items（粒度为 full、signature、outline 或 location）、token_count、omitted|budget 低于 min_budget 返回 budget_too_small；v0.1 的 task 只按符号名和路径匹配|
 
-实现补充：关系查询支持 `path_prefix`（CLI `--path`），按引用或调用发生位置过滤。`repo_map` 包含空源文件模块、`core_symbols`（按不同入边符号数排序）、`omitted_core_symbols` 与 `analysis_health`；`max_symbols_per_module=0` 表示返回所有模块内符号，人工格式默认采用此值，Agent 默认仍为 20。
+实现补充：关系查询支持 `path_prefix`（CLI `--path`），按引用、调用或实现发生位置过滤。`repo_map` 包含空源文件模块、`core_symbols`（按不同入边符号数排序）、`omitted_core_symbols` 与 `analysis_health`；`max_symbols_per_module=0` 表示返回所有模块内符号，人工格式默认采用此值，Agent 默认仍为 20。
+
+#### find_implementations：Rust trait 实现查询（v0.2 增量）
+
+首请求必填 `symbol`，可用 `symbol_id`、唯一名称或限定名；解析结果须为 Rust `trait` 或 `trait_method`。方法目标先解析所属 trait；结构体、普通函数和 impl 方法等其他 kind 返回 `invalid_argument`，目标不存在或不唯一分别返回 `symbol_not_found`、`ambiguous_symbol`。后续页可只传 `cursor` 和可调整的 `timeout_ms`，其他参数遵循上方通用游标契约。
+
+可选参数 `path_prefix` 按实现所在文件过滤，`source` 为 L1/L2/L3 数组，`certainty` 为 definite/candidate 数组，`freshness` 为 current/pending 数组（默认二者）。当前实现查询使用 L1 和已发布的 L3，不产生 L2 证据，不在查询时请求语义后端。`source` 先筛选关系证据，随后按保留的证据重算确定性，再应用 `certainty` 和 `freshness`；统计依据过滤后的关系。`source=["L3"]` 不返回只有名称匹配的 L1 候选，`source=["L1"]` 不保留 L3 带来的 definite。`snapshot_id`、`semantic_epoch`、`require_fresh`、`fresh_wait_ms`、`limit`、`cursor`、`timeout_ms` 均沿用事实查询约定；本工具不支持 `include_stale` / `stale_from`，不能借 `freshness=["stale"]` 请求历史扩展。直接固定历史快照查询时，证据相对于该视图判断新鲜度。
+
+响应沿用公共信封与 `schema_version="0.1"`，增加以下字段：
+
+|字段|含义|
+|---|---|
+|target|本次解析的 trait 或 trait 方法符号|
+|trait|所属 trait 的符号；trait 模式下与 target 指向同一符号|
+|mode|`trait` 或 `trait_method`|
+|relations|`kind="implements"` 的显式实现关系；trait 模式从 `impl_id` 指向 trait，位置为 impl 头部的 trait 名；方法模式从显式实现方法指向目标 trait 方法，位置为实现方法名|
+|relations[].implementation|所属 impl 的 `impl_id`、`trait_path`、`self_type`、`generics`、`unsafe`、`blanket`、`location`、`span` 与 `methods`；location 带 file_hash，methods 列出已索引的直接方法及其 symbol_id、名称、行号和 scope|
+|implementation_counts|过滤后完整结果的统计，具体口径见下文|
+|inherited_defaults|方法模式下未显式覆盖目标默认方法的 impl；列出 impl 身份、类型、位置、scope 与确定性，单独表示继承默认体的候选，不生成显式实现方法关系；trait 模式为空|
+|excluded_candidates|存在可靠的 definite 竞争头部绑定、且无目标绑定时才排除的名称候选，附 impl 身份、位置、实际绑定目标及原因；不属于实现关系；candidate 竞争或确定绑定冲突保留为候选并披露 gap|
+
+关系的 `scope` 为 `production` 或 `test`：trait 模式和默认方法继承项以 impl 的 `block.test_only` 为准，包括已抽取的 `#[cfg(test)]`、`tests/` 等测试作用域；没有方法的标记 trait 或空 impl 也使用这个标记。方法模式与 implementation.methods 的方法项沿用 `test_scope()`。生产 impl 内单个 `#[cfg(test)]` 方法可以标为 test，但不能把整个 impl 或其他方法归为 test。测试作用域是源码分类，不表示测试已运行或覆盖了目标。text / Markdown 输出按相同作用域分组并显示实现统计与默认方法继承项。
+
+`implementation_counts.total` 是**过滤后完整结果中显式实现关系的条数**，trait 模式按 impl 关系计，方法模式只按显式方法实现关系计；`production + test = total`。`with_semantic_evidence` 为其中保留语义证据的关系数，`blanket` 为其中标注为 blanket 的关系数。`inherited_defaults`、`excluded` 分别计对应元数据数组的条目，不加入 total；它们也不加入 `evidence_summary.relation_count`。blanket 标记来自语法启发式，不表示已枚举其适用的具体类型。
+
+**分页与元数据**：只有 `relations` 消费 `limit` 并通过游标分页。`implementation_counts` 和 `evidence_summary` 描述过滤后、分页前的完整显式关系集合，不能随页变化，也不是实现类型数或当前页长度。`inherited_defaults`、`excluded_candidates` 是同一绑定视图与过滤参数下的完整快照元数据，应用适用的路径、来源、确定性、新鲜度过滤后随每页完整返回，不消费 limit、不各自分页；不能跨页累加它们的条目或计数。只有默认方法继承而没有显式覆盖时，允许 total 为 0、relations 为空而 inherited_defaults 非空。`output.returned_relations`、`remaining_relations` 和续页游标只描述显式关系；首页后的编辑和语义刷新不改变该游标绑定的结果。
+
+例如过滤后有 3 条显式实现关系和 2 个默认方法继承项，`limit=1` 时依次返回 3 页：每页 total 都为 3、inherited_defaults 计数都为 2，两项默认继承元数据均在每页返回；三页 relations 的并集才是那 3 条显式关系。
+
+证据推导见[证据模型](evidence-model.md#21-关系证据)：语法名称实际匹配时才附 L1 `syntax_impl_header+name_match`，始终为 candidate；已发布的 L3 头部绑定与方法分派分别以 `impl_header_binding:*`、`impl_dispatch:*` 保留来源。L3 头部绑定可独立识别 `use Trait as Alias` 后的 `impl Alias for Type`，即使语法末段不匹配也可返回；这种仅靠 L3 识别的别名实现不得伪造 L1 name_match，`source=["L1"]` 应将它过滤掉。LSP 证据仍为 candidate，已验证并对齐的 SCIP 绑定可提供 definite；不能只凭 trait 同名或方法同名假定存在 L3。无语义绑定时仅匹配 trait 路径末段，不解析 use 导入、别名和遮蔽，同名候选可能误入，别名实现也可能漏掉。negative impl 不作为正向实现返回；`std` / `core` / `alloc` 路径不凭末段名称冒充工作区同名 trait。
+
+方法分派证据要求同一调用方、同一调用位置上同时存在目标 trait 方法与实现方法的 L3 绑定，且两份证据来自同一个语义索引器。仅复制实现分派证据，分派证据单独存在时仍为 candidate；其新鲜度取实现绑定与 trait 方法绑定中较差者。来源过滤后重新计算新鲜度，只有 L1 留下时不沿用被过滤掉的 L3 状态。
+
+仅当头部存在可靠的 definite 证据绑定到其他 trait、且没有指向目标 trait 的绑定时，名称候选才进入 `excluded_candidates`。candidate 竞争绑定不能证明名称候选属于其他 trait；确定绑定互相冲突时也不能选择其一。两类情况均保留候选，certainty 不得因冲突提升为 definite，并在 `known_gaps` 披露语义歧义或冲突；来源过滤不能消除该冲突约束。
+
+`completeness.known_gaps` 披露以下实现查询缺口，存在缺口时仍为 partial；关系全部 definite、统计 exact 或空结果都不能消除分析边界：
+
+|kind|含义|
+|---|---|
+|external_implementations_not_indexed|未纳入索引的外部依赖、下游 crate 和其他工作区实现不可见，不能断言已找到所有消费者|
+|generated_impls_not_extracted|仅列已抽取的源码 impl，不展开 derive、过程宏或声明宏生成的实现|
+|blanket_impl_coverage_unknown|发现 blanket impl 时披露其覆盖类型未知，不为每个可能类型枚举或合成实现|
+|implementation_semantic_evidence_missing|部分结果仅有语法名称候选，没有已发布的语义绑定支持|
+|trait_name_ambiguous|存在同名 trait，缺少语义绑定时名称匹配不能判定归属|
+|impl_header_binding_ambiguous|impl 头部存在竞争或冲突的 trait 绑定，保留候选并限制 certainty，不能任选绑定提升为 definite|
+|impl_method_not_found|impl 中未找到目标方法且 trait 方法无默认体；可能是宏生成或源码未通过编译，不能伪造方法实现关系|
+
+当前仅支持 Rust trait / trait 方法，其他语言的 interface、类继承和覆盖查询仍属未来规划。生成实现、blanket 覆盖和外部边界的限制也适用于默认方法继承元数据。
 
 `context_pack` 支持 `cl100k_base@tiktoken-rs-0.12.1` 与 `o200k_base@tiktoken-rs-0.12.1` 两个离线精确模式，最终紧凑 JSON 的完整 BPE 计数包括计数元数据自身和各省略页；最小预算均为 4096。`retrieval` 披露名称与路径检索的候选目标数，内容依次降为定义、签名、大纲或位置，省略目标提供固定视图续查入口。
 
@@ -294,11 +344,15 @@ semweft impact --diff origin/main...HEAD --format markdown
 semweft context inventory::Stock::deduct --budget 20k --tokenizer <model-id>
 semweft mcp                          # stdio 桥接，自动连接或拉起 daemon
 
-# v0.2：限定规则、测试候选和受限路径
+# v0.2 增量：已接入的 Rust trait 实现查询
+semweft impls inventory::Deduct --path crates/inventory
+semweft impls inventory::Deduct::deduct --source L3 --certainty candidate
+semweft impls inventory::Deduct --freshness current --limit 1 --format json
+
+# v0.2 规划：限定规则、测试候选和受限路径，尚未在本次接入
 semweft verify --diff WORKTREE --rules api-signature  # 对比两侧并核验声明规则
 semweft tests --suggested --diff HEAD~1..HEAD
 semweft path create_order deduct --max-depth 5 --max-paths 100
-semweft impls inventory::Deduct                       # trait 实现列表
 semweft search --visibility public --path crates/inventory   # 公开 API 清单
 semweft map --dependencies module --cycles            # 循环依赖检测
 
@@ -319,7 +373,7 @@ semweft query 'MATCH (f:Function)-[:CALLS*1..3]->(g {name:"exec_sql"}) RETURN f'
 semweft tui
 ```
 
-核心 CLI 与 MCP 对应：map → repo_map、search → search_symbols、symbol-at → symbol_at、symbol → get_symbol、refs → find_references、calls → call_graph、impact → impact_of、context → context_pack、capabilities → capabilities、status → index_status；v0.2 起 impls → find_implementations，search --visibility 对应 search_symbols 的 visibility 参数，map --cycles 对应 repo_map 的 cycles 参数。report 是 CLI 渲染器，组合 repo_map 与 impact_of 的固定视图，不对应独立 MCP 工具。calls 的 --direction 默认 callers，可选 callees、both。事实查询命令共用 --snapshot-id、--semantic-epoch、--require-fresh、--fresh-wait-ms、--timeout-ms 与 --format；关系工具另提供 --source、--certainty、--freshness。refs 的历史请求使用 `--include-stale --stale-from <snapshot_id> --stale-semantic-epoch <epoch>`，对应 1.3 节。JSON 使用相同响应结构，diff 版本绑定按 1.4 节处理。
+核心 CLI 与 MCP 对应：map → repo_map、search → search_symbols、symbol-at → symbol_at、symbol → get_symbol、refs → find_references、impls → find_implementations、calls → call_graph、impact → impact_of、context → context_pack、capabilities → capabilities、status → index_status。规划中的 search --visibility 对应 search_symbols 的 visibility 参数，map --cycles 对应 repo_map 的 cycles 参数；report 为规划中的 CLI 渲染器，组合 repo_map 与 impact_of 的固定视图，不对应独立 MCP 工具。calls 的 --direction 默认 callers，可选 callees、both。事实查询命令共用 --snapshot-id、--semantic-epoch、--require-fresh、--fresh-wait-ms、--limit、--cursor、--timeout-ms 与 --format；关系工具另提供 --path、--source、--certainty、--freshness。impls 的必填位置参数为 trait 或 trait 方法，--path 映射为 path_prefix，完整计数和两类元数据的分页约定见 1.3 节。refs 的历史请求使用 `--include-stale --stale-from <snapshot_id> --stale-semantic-epoch <epoch>`，对应 1.3 节。JSON 使用相同响应结构，diff 版本绑定按 1.4 节处理。
 
 工作区选择使用 --workspace，配置文件选择使用 --config，查找与优先级见[架构设计](architecture.md)第 1.2 节。v0.1 semweft mcp 仅提供 stdio，无本地 HTTP 监听选项。
 

@@ -8,10 +8,12 @@
 
 下表是产品能力地图，首版范围见下一张交付表。P0 为首版查询闭环必需能力；P1 为后续语言、规则和团队扩展；P2 为按验证结果排期的增强能力。具体交付以[路线图](roadmap.md)第 1 节为准，分析承诺共用[证据模型](evidence-model.md)第 2.3 节；能力清单披露实际支持状态。
 
+当前 v0.2 增量只增加 Rust `find_implementations` / `semweft impls`，工具总数为 11；`verify_change` 尚未接入。下文其余 v0.2 及后续版本内容继续表示规划，不能视为本次增量已交付。
+
 |编号|模块|核心能力|优先级|
 |---|---|---|---|
 |A|代码摄取与索引|语法与语义证据、依赖失效和增量刷新；多语言、多仓库逐步扩展|P0|
-|B|符号与导航|定义、引用、符号大纲；实现与类型层级后续增加|P0|
+|B|符号与导航|定义、引用、符号大纲；本次增加 Rust trait 实现查询，其他实现与类型层级后续增加|P0|
 |C|调用图与依赖图|受限调用关系、模块和包依赖；路径查询、框架入口与循环检测后续增加|P0|
 |D|变更影响分析|候选影响范围、证据报告；后续增加测试候选、风险评分和限定规则核验|P0|
 |E|Agent 上下文引擎|上下文包、Token 预算、结构地图；语义检索与增量上下文后续增加|P0|
@@ -77,11 +79,19 @@
 |符号搜索|按名称、模糊匹配、限定路径、类型（函数、类型、字段等）搜索符号|P0|
 |跳转定义|symbol_at 接收文件、行、列，解析声明或引用 occurrence，返回目标符号、源码位置及证据；不唯一时列候选，坐标约定见接口规格|P0|
 |查找引用|返回声明范围内已解析及候选引用，区分读、写、调用、类型引用、导入并披露未解析项|P0|
-|实现与继承|已索引的 trait 和 interface 实现、类继承链、方法覆盖关系；外部实现属于分析边界。v0.2 起提供 Rust trait 实现列表（原型已用 implementation 查询验证），测试作用域单独标注|P1|
+|实现与继承|本次 v0.2 增量提供 Rust trait / trait 方法的已索引显式实现查询；L1 名称候选与 L3 语义证据分开，测试作用域、默认方法继承和排除候选单列。其他语言 interface 实现、类继承链与类型层级仍属后续规划|P1|
 |符号大纲|文件、模块、包级别的结构摘要，只含签名和文档注释，不含函数体|P0|
 |签名与文档|首版返回签名、注释、可见性和所属模块；所有权随 Git/CODEOWNERS 适配增加|P0|
 |字段读写分析|某个结构体字段在哪里被读、在哪里被写|P1|
 |公共 API 清单|列出声明构建配置下已解析的公开 API，并披露条件编译和生成物缺口；v0.2 起作为符号搜索的可见性过滤提供|P1|
+
+`semweft impls <trait-or-trait-method> --path <prefix>` 对应 `find_implementations`，支持来源、确定性、新鲜度、固定快照和游标参数；非 trait / trait_method 目标返回参数错误。trait 模式列 impl（包括标记 trait 和空 impl），方法模式只为显式覆盖生成 `kind=implements` 关系，未覆盖的默认方法通过 `inherited_defaults` 单独计数。`scope=production/test` 供 text / Markdown 分组：impl 与默认方法继承以 `block.test_only` 为准，显式方法使用 `test_scope()`，不能因单个测试方法把生产 impl 归为 test；它不表示测试已执行或足以验证实现。
+
+语法头部 `syntax_impl_header+name_match` 只支持 L1 candidate，不解析 use 导入、别名和遮蔽。已发布的语义头部绑定 `impl_header_binding:*` 和方法分派 `impl_dispatch:*` 才能增加 L3；LSP 仍为 candidate，已验证并对齐的 SCIP 绑定可提供 definite，不凭 trait 或方法同名假定语义关系。L3 头部绑定可独立识别 use 别名；语法名称不匹配的别名实现不附 L1 name_match，也不出现在 `--source L1` 结果中。仅有可靠 definite 竞争头部绑定且无目标绑定时才进入 `excluded_candidates`；candidate 竞争或确定绑定冲突保留候选并披露 gap。缺少语义证据时，同名 trait 可能误入候选，别名实现可能漏掉。
+
+只有 `relations` 分页。`implementation_counts.total` 为过滤后完整显式实现关系条数，`production`、`test`、`with_semantic_evidence`、`blanket` 都按该集合统计，不随页变化；默认方法继承与排除候选单独计数，不并入 total。`inherited_defaults` / `excluded_candidates` 是完整过滤后的快照元数据，随每页完整返回，不消费分页限额，也不能跨页累加。
+
+当前仅覆盖 Rust 源码中的显式 impl，不展开 derive、过程宏和声明宏生成实现；blanket impl 只列声明，不枚举它覆盖的具体类型；未索引依赖、下游 crate 与其他工作区的实现不可见。negative impl 不作为正向实现。上述边界及语义证据不足、同名歧义、必需方法缺失均通过 `completeness.known_gaps` 披露，不能把空结果或 definite 关系解释为已覆盖全部实现。完整字段与 gap kind 见[接口契约](interfaces.md#find_implementationsrust-trait-实现查询v02-增量)。
 
 ### C. 调用图与依赖图
 

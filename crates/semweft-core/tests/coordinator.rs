@@ -83,6 +83,7 @@ fn basic() -> (Manifest, SyntaxFacts) {
     let hash = manifest.files["src/lib.rs"].file_hash.clone();
     let syntax = SyntaxFacts {
         declarations: BTreeMap::new(),
+        impls: vec![],
         imports: BTreeMap::new(),
         symbols: vec![
             symbol(
@@ -132,6 +133,7 @@ fn two_files() -> (Manifest, SyntaxFacts) {
     let b = manifest.files["src/b.rs"].file_hash.clone();
     let syntax = SyntaxFacts {
         declarations: BTreeMap::new(),
+        impls: vec![],
         imports: BTreeMap::new(),
         symbols: vec![
             symbol(
@@ -288,6 +290,7 @@ fn body_edits_reuse_outside_outcomes_and_remap_moved_declarations() {
     // Same skeleton, but both declarations moved down by one line.
     let syntax = SyntaxFacts {
         declarations: BTreeMap::new(),
+        impls: vec![],
         imports: BTreeMap::new(),
         symbols: vec![
             symbol(
@@ -395,6 +398,7 @@ fn ambiguous_declarations_prevent_target_reuse() {
     // cannot be identified unambiguously, so the callsite must be re-queried.
     let syntax = SyntaxFacts {
         declarations: BTreeMap::new(),
+        impls: vec![],
         imports: BTreeMap::new(),
         symbols: vec![
             symbol(

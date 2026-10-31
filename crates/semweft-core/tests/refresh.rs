@@ -61,6 +61,7 @@ fn input(version: &str) -> (Manifest, SyntaxFacts) {
         },
         SyntaxFacts {
             declarations: BTreeMap::new(),
+            impls: vec![],
             imports: BTreeMap::new(),
             symbols: vec![caller, target],
             calls: vec![call],
@@ -329,6 +330,182 @@ fn invalid_file_hashes_and_source_spans_are_rejected_before_publication() {
     syntax.calls[0].span.end.column = 999;
     assert!(coordinator.publish_inputs(manifest, syntax).is_err());
     assert!(coordinator.latest().is_none());
+}
+
+fn impl_input() -> (Manifest, SyntaxFacts) {
+    let text = "trait T { fn run(&self); }\nstruct S;\nimpl T for S {\n    fn run(&self) {}\n}\n";
+    let file = SourceFile::new(text);
+    let method_span = Span {
+        start: Position { line: 4, column: 5 },
+        end: Position {
+            line: 4,
+            column: 21,
+        },
+    };
+    let syntax = SyntaxFacts {
+        symbols: vec![Symbol {
+            symbol_id: "method".into(),
+            name: "run".into(),
+            qualified_name: "src/lib.rs::<T for S>::run".into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            file_hash: file.file_hash.clone(),
+            span: method_span,
+            name_span: Span {
+                start: Position { line: 4, column: 8 },
+                end: Position {
+                    line: 4,
+                    column: 11,
+                },
+            },
+            signature: "fn run(&self)".into(),
+        }],
+        impls: vec![ImplBlock {
+            impl_id: "impl".into(),
+            file: "src/lib.rs".into(),
+            file_hash: file.file_hash.clone(),
+            span: Span {
+                start: Position { line: 3, column: 1 },
+                end: Position { line: 5, column: 2 },
+            },
+            trait_path: "T".into(),
+            trait_span: Span {
+                start: Position { line: 3, column: 6 },
+                end: Position { line: 3, column: 7 },
+            },
+            self_type: "S".into(),
+            generics: vec![],
+            negative: false,
+            unsafe_impl: false,
+            test_only: false,
+            methods: vec!["method".into()],
+        }],
+        ..Default::default()
+    };
+    let manifest = Manifest {
+        workspace_id: "workspace".into(),
+        files: BTreeMap::from([
+            ("src/lib.rs".into(), file.clone()),
+            ("src/other.rs".into(), file),
+        ]),
+        binary_files: BTreeMap::new(),
+        analysis_versions: BTreeMap::new(),
+        scope: "fixture".into(),
+    };
+    (manifest, syntax)
+}
+
+fn assert_impl_rejected(mutate: impl FnOnce(&mut SyntaxFacts), expected: &str) {
+    let (manifest, mut syntax) = impl_input();
+    let mut coordinator = RefreshCoordinator::default();
+    let valid = coordinator
+        .publish_inputs(manifest.clone(), syntax.clone())
+        .unwrap();
+    mutate(&mut syntax);
+    let mut fresh = RefreshCoordinator::default();
+    assert_eq!(
+        fresh.publish_inputs(manifest, syntax.clone()).unwrap_err(),
+        expected
+    );
+    assert!(fresh.latest().is_none());
+    let mut persisted = (*valid).clone();
+    Arc::make_mut(&mut persisted.snapshot).syntax = syntax;
+    assert_eq!(
+        RefreshCoordinator::restore(vec![Arc::new(persisted)])
+            .err()
+            .as_deref(),
+        Some(expected)
+    );
+}
+
+#[test]
+fn impl_facts_publish_and_restore_with_methods_and_marker_blocks() {
+    let (manifest, mut syntax) = impl_input();
+    let mut marker = syntax.impls[0].clone();
+    marker.impl_id = "marker".into();
+    marker.methods.clear();
+    marker.negative = true;
+    marker.unsafe_impl = true;
+    syntax.impls.push(marker);
+    let mut coordinator = RefreshCoordinator::default();
+    let published = coordinator
+        .publish_inputs(manifest, syntax.clone())
+        .unwrap();
+    let restored = RefreshCoordinator::restore(vec![published.clone()]).unwrap();
+    assert_eq!(restored.latest().unwrap().snapshot.syntax, syntax);
+    assert_eq!(restored.latest().unwrap(), published);
+}
+
+#[test]
+fn impl_facts_validate_ids_file_hashes_and_spans_before_publication_and_restore() {
+    assert_impl_rejected(
+        |syntax| syntax.impls.push(syntax.impls[0].clone()),
+        "duplicate_impl",
+    );
+    assert_impl_rejected(
+        |syntax| syntax.impls[0].file = "missing.rs".into(),
+        "file_not_found",
+    );
+    assert_impl_rejected(
+        |syntax| syntax.impls[0].file_hash = "stale".into(),
+        "content_mismatch",
+    );
+    assert_impl_rejected(
+        |syntax| syntax.impls[0].span.end = syntax.impls[0].span.start,
+        "invalid_span",
+    );
+    assert_impl_rejected(
+        |syntax| syntax.impls[0].span.end.column = 999,
+        "column out of bounds or inside a UTF-8 character",
+    );
+    assert_impl_rejected(
+        |syntax| syntax.impls[0].trait_span.end.column = 1,
+        "invalid_span",
+    );
+    assert_impl_rejected(
+        |syntax| syntax.impls[0].trait_span.start.column = 999,
+        "invalid_span",
+    );
+    assert_impl_rejected(
+        |syntax| syntax.impls[0].trait_span.start.line = 1,
+        "invalid_span",
+    );
+}
+
+#[test]
+fn impl_facts_validate_method_references_before_publication_and_restore() {
+    assert_impl_rejected(
+        |syntax| syntax.impls[0].methods.push("unknown".into()),
+        "unknown_impl_method",
+    );
+    assert_impl_rejected(
+        |syntax| syntax.impls[0].methods.push("method".into()),
+        "duplicate_impl_method",
+    );
+    assert_impl_rejected(
+        |syntax| {
+            let mut other = syntax.impls[0].clone();
+            other.impl_id = "other".into();
+            syntax.impls.push(other);
+        },
+        "duplicate_impl_method",
+    );
+    assert_impl_rejected(
+        |syntax| syntax.symbols[0].kind = "trait_method".into(),
+        "invalid_impl_method",
+    );
+    assert_impl_rejected(
+        |syntax| syntax.symbols[0].file = "src/other.rs".into(),
+        "invalid_impl_method",
+    );
+    assert_impl_rejected(
+        |syntax| syntax.symbols[0].span.start.line = 1,
+        "invalid_impl_method",
+    );
+    assert_impl_rejected(
+        |syntax| syntax.symbols[0].name_span.start.line = 1,
+        "invalid_impl_method",
+    );
 }
 
 #[test]

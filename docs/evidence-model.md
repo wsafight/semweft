@@ -45,6 +45,18 @@
 
 **SCIP 的边界**：SCIP 提供 occurrence、符号信息及部分符号关系，不是完整的调用图。将语义引用与语法调用点对齐后，可生成有 L3 证据支持的调用边，但仍须按语言规则判断 certainty；宏、重载、动态分发和位置映射失败要分别诊断。对齐本身不构成准确率证明。L3 表示语义证据来源，不是对整体正确性或完整性的认证。
 
+**Rust 实现关系（find_implementations）**：`kind="implements"` 表示已索引的显式 trait 实现。trait 模式由 impl 身份指向 trait，位置为 impl 头部 trait 名；trait_method 模式由显式实现方法指向 trait 方法，位置为实现方法名。同一实现关系可挂多条证据，`relations[].implementation` 保留 impl 头部、类型、泛型、位置和直接方法等语法事实。默认方法继承另放 `inherited_defaults`，不伪造显式方法关系；仅有可靠的 definite 竞争头部绑定且无目标绑定时，才将名称候选放 `excluded_candidates`。candidate 竞争或确定绑定冲突均保留为 candidate 并披露 gap，不据此排除或提升为 definite。
+
+|source / derivation|支持内容与确定性|
+|---|---|
+|L1 / `syntax_impl_header+name_match`|源码 impl 头部的 trait 路径末段与目标名称匹配；始终 candidate，不解析导入、别名和遮蔽|
+|L3 / `impl_header_binding:*`|复制 impl 头部 trait 名位置上、指向目标 trait 的已发布语义引用证据，可独立识别 use 别名；保留原索引器与确定性，LSP 引用仍为 candidate，已验证并对齐的 SCIP 绑定可为 definite|
+|L3 / `impl_dispatch:*`|方法模式下，已发布的语义分派在同一调用点支持目标 trait 方法与具体实现方法，保留分派来源；LSP implementation 分派为 candidate|
+
+该工具当前不产生 L2。trait 或方法同名只能支持 L1 候选，不能据此构造 L3；没有具体语义绑定时，不能把一个同名方法认定为目标 trait 的实现。反过来，仅靠 L3 识别、语法名称不匹配的别名实现不得附 L1 name_match，`source=["L1"]` 不应返回它。无冲突的 definite 证据可按关系级规则提升确定性，LSP candidate 或 blanket 标记本身均不能提升为 definite；来源过滤后须按保留证据重新计算确定性，仍须保留冲突诊断。
+
+`scope=production/test` 是源码测试作用域分类，不代表运行时观测或逐测试覆盖证据。impl 关系和默认方法继承以 `block.test_only` 为准，显式方法使用 `test_scope()`；单个测试方法不能把生产 impl 归为 test。实现统计按过滤后、分页前的完整显式关系计数，默认方法继承与排除候选单独计数。只有 relations 分页，两个元数据数组经过适用过滤后随每页完整返回，不因重复返回而累计。即使语义证据可确定某条实现关系，宏与 derive 生成实现、blanket 覆盖类型、未索引依赖和下游实现仍有独立缺口；候选集合不承诺穷尽。精确字段及 gap kind 见[接口契约](interfaces.md#find_implementationsrust-trait-实现查询v02-增量)。
+
 ### 2.2 范围声明与核验结果
 
 每个查询包含 completeness，说明分析范围、已知缺口和尚未刷新的单元；分页、路径限制和上下文预算造成的输出缺省另放在 output 字段。范围声明可以披露已知未知，不能承诺识别所有未知遗漏。
@@ -59,7 +71,7 @@
 
 **status 判定**：声明范围内的受支持分析全部完成，且 known_gaps 与 pending_units 均为空时为 within_scope；存在任一 known_gaps 或 pending_units 时为 partial；分析范围本身无法确定（如构建配置识别失败、首次索引未完成）时为 unknown。within_scope 不与非空 known_gaps 同时出现。
 
-影响图表示候选影响，不直接判断每个调用方是否必须修改。verify_change 核验明确声明的规则，返回 findings 和规则版本，每条规则单独返回三个状态之一：violations_found（发现违规）、no_violations_found（声明范围内未发现违规）、insufficient_evidence（证据不足）。整体结果取最严重者：任一规则 violations_found 则整体为 violations_found；否则任一 insufficient_evidence 则整体为 insufficient_evidence；全部规则为 no_violations_found 时整体才为 no_violations_found。未运行的规则和缺失证据必须列出；行为正确性仍需依靠需求、编译器、测试或人工证据。人的批准作为独立审查记录，不提升关系 certainty 或消除分析缺口。
+影响图表示候选影响，不直接判断每个调用方是否必须修改。verify_change 尚未接入，本次 v0.2 增量仅增加实现查询；以下为后续规则核验的契约规划：核验明确声明的规则，返回 findings 和规则版本，每条规则单独返回三个状态之一：violations_found（发现违规）、no_violations_found（声明范围内未发现违规）、insufficient_evidence（证据不足）。整体结果取最严重者：任一规则 violations_found 则整体为 violations_found；否则任一 insufficient_evidence 则整体为 insufficient_evidence；全部规则为 no_violations_found 时整体才为 no_violations_found。未运行的规则和缺失证据必须列出；行为正确性仍需依靠需求、编译器、测试或人工证据。人的批准作为独立审查记录，不提升关系 certainty 或消除分析缺口。
 
 ### 2.3 承诺边界（所有文档适用）
 

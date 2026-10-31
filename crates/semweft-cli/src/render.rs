@@ -227,6 +227,24 @@ pub fn render(
             )?;
         }
     }
+    if let Some(counts) = value.get("implementation_counts") {
+        writeln!(
+            out,
+            "\n实现计数（过滤后全量）：总计 {}，生产 {}，测试 {}，语义证据 {}，blanket {}，默认方法继承 {}，排除 {}。",
+            counts["total"],
+            counts["production"],
+            counts["test"],
+            counts["with_semantic_evidence"],
+            counts["blanket"],
+            counts["inherited_defaults"],
+            counts["excluded"]
+        )?;
+        writeln!(
+            out,
+            "当前页：{} 条实现关系；默认方法继承与排除候选为过滤后全量快照元数据，随页重复。",
+            value["relations"].as_array().map_or(0, Vec::len)
+        )?;
+    }
     if let Some(relations) = value["relations"].as_array() {
         let mut test = vec![];
         let mut grouped = std::collections::BTreeMap::<String, Vec<&Value>>::new();
@@ -257,6 +275,24 @@ pub fn render(
             if markdown {
                 writeln!(out, "\n</details>")?;
             }
+        }
+    }
+    if let Some(defaults) = value["inherited_defaults"]
+        .as_array()
+        .filter(|defaults| !defaults.is_empty())
+    {
+        heading(&mut out, "继承默认方法（过滤后全量，随页重复）", markdown)?;
+        for inherited in defaults {
+            writeln!(
+                out,
+                "- impl {} for {} 继承 {} [{} {}] — {}",
+                inherited["trait_path"].as_str().unwrap_or("?"),
+                inherited["self_type"].as_str().unwrap_or("?"),
+                label(&value["target"]),
+                inherited["scope"].as_str().unwrap_or("?"),
+                inherited["certainty"].as_str().unwrap_or("?"),
+                location(&inherited["location"])
+            )?;
         }
     }
     if let Some(history) = value.get("history") {
@@ -667,6 +703,75 @@ mod tests {
                 "invalid_argument: bad input"
             );
         }
+    }
+
+    #[test]
+    fn impls_reports_distinguish_page_relations_from_full_snapshot_metadata() {
+        let value = json!({
+            "snapshot_id":"snap_impls","epochs":{"syntax":1,"semantic":0},
+            "completeness":{"status":"partial","pending_units":[]},
+            "output":{"truncated":true,"truncation_reason":"limit",
+                "continuation":{"next_cursor":"impls_page"}},
+            "target":{"qualified_name":"shop::Deduct::name","signature":"fn name(&self) -> &str",
+                "location":{"file":"src/lib.rs","line":2,"column":5}},
+            "implementation_counts":{"total":4,"production":3,"test":1,
+                "with_semantic_evidence":2,"blanket":1,"inherited_defaults":2,"excluded":1},
+            "relations":[{"from_name":"<Deduct for Fake>::name","to_name":"Deduct::name",
+                "kind":"implements","certainty":"candidate","freshness":"current","scope":"test",
+                "location":{"file":"tests/impls.rs","line":3,"column":5}}],
+            "inherited_defaults":[
+                {"trait_path":"Deduct","self_type":"Stock","scope":"production","certainty":"candidate",
+                    "location":{"file":"src/lib.rs","line":8,"column":1}},
+                {"trait_path":"super::Deduct","self_type":"DefaultFake","scope":"test","certainty":"candidate",
+                    "location":{"file":"src/lib.rs","line":20,"column":1}}
+            ],
+            "excluded_candidates":[{"impl_id":"excluded","self_type":"Other","reason":"different trait"}]
+        });
+        for format in [Format::Text, Format::Markdown] {
+            let text = render(&value, format, None, false).unwrap();
+            assert!(text.contains("实现计数（过滤后全量）：总计 4，生产 3，测试 1，语义证据 2，blanket 1，默认方法继承 2，排除 1。"), "{text}");
+            assert!(text.contains("当前页：1 条实现关系"), "{text}");
+            assert!(text.contains("默认方法继承与排除候选为过滤后全量快照元数据，随页重复。"));
+            assert!(text.contains("继承默认方法（过滤后全量，随页重复）"));
+            assert!(text.contains("impl Deduct for Stock 继承 shop::Deduct::name [production candidate] — src/lib.rs:8:1"));
+            assert!(text.contains("impl super::Deduct for DefaultFake 继承 shop::Deduct::name [test candidate] — src/lib.rs:20:1"));
+            assert!(text.contains("测试作用域：1 条候选关系"));
+            assert!(text.contains("- <Deduct for Fake>::name → Deduct::name [implements candidate current] — tests/impls.rs:3:5"));
+            assert_eq!(text.matches(" 继承 shop::Deduct::name").count(), 2);
+            if matches!(format, Format::Markdown) {
+                assert!(text.contains("## 继承默认方法"));
+                assert!(text.contains("<details><summary>测试关系</summary>"));
+            }
+        }
+        let rendered = render(&value, Format::Json, None, false).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&rendered).unwrap(), value);
+    }
+
+    #[test]
+    fn impls_empty_relations_still_report_full_default_metadata_and_zero_counts() {
+        let mut value = json!({
+            "snapshot_id":"snap_impls","epochs":{"syntax":1,"semantic":0},
+            "completeness":{"status":"partial","pending_units":[]},
+            "output":{"truncated":false},
+            "target":{"qualified_name":"Deduct::name"},
+            "implementation_counts":{"total":0,"production":0,"test":0,
+                "with_semantic_evidence":0,"blanket":0,"inherited_defaults":1,"excluded":0},
+            "relations":[],"excluded_candidates":[],
+            "inherited_defaults":[{"trait_path":"Deduct","self_type":"Stock","scope":"production",
+                "certainty":"candidate","location":{"file":"src/lib.rs","line":8,"column":1}}]
+        });
+        for format in [Format::Text, Format::Markdown] {
+            let text = render(&value, format, None, false).unwrap();
+            assert!(text.contains("实现计数（过滤后全量）：总计 0，生产 0，测试 0，语义证据 0，blanket 0，默认方法继承 1，排除 0。"));
+            assert!(text.contains("当前页：0 条实现关系"));
+            assert!(text.contains("impl Deduct for Stock 继承 Deduct::name"));
+        }
+        value["inherited_defaults"] = json!([]);
+        value["implementation_counts"]["inherited_defaults"] = json!(0);
+        let text = render(&value, Format::Text, None, false).unwrap();
+        assert!(text.contains("默认方法继承 0，排除 0。"));
+        assert!(!text.contains("继承默认方法（过滤后全量"));
+        assert!(!text.contains("[production candidate]"));
     }
 
     #[test]
