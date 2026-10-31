@@ -1,0 +1,11 @@
+[package]
+name = "semweft-lang-rust"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+semweft-core.workspace = true
+serde_json.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true

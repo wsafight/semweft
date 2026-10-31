@@ -1,0 +1,45 @@
+[workspace]
+members = ["crates/semweft-protocol", "crates/semweft-storage", "crates/semweft-shared", "crates/semweft-algo", "crates/semweft-core", "crates/semweft-store", "crates/semweft-bench", "crates/semweft-lang-rust", "crates/semweft-lang-go", "crates/semweft-lang-web", "crates/semweft-cli", "crates/semweft-query"]
+exclude = ["crates/semweft-desktop"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+lz4_flex = "0.11"
+miniz_oxide = "0.8"
+anyhow = "1.0"
+blake3 = "1.8"
+clap = { version = "4.6", features = ["derive"] }
+ignore = "0.4"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+tempfile = "3.27"
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+url = { version = "2.5", features = ["serde"] }
+toml = "1.1.8"
+globset = "0.4"
+interprocess = "2.4.7"
+notify = "8.2"
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "io-std", "signal", "time"] }
+rmcp = { version = "3.8", features = ["server", "transport-io"] }
+scip = "0.10"
+protobuf = "3.7"
+libc = "0.2"
+tiktoken-rs = "=0.12.1"
+tree-sitter-go = "0.25"
+semweft-lang-go = { path = "crates/semweft-lang-go" }
+semweft-core = { path = "crates/semweft-core" }
+semweft-lang-rust = { path = "crates/semweft-lang-rust" }
+semweft-lang-web = { path = "crates/semweft-lang-web" }
+semweft-shared = { path = "crates/semweft-shared" }
+semweft-algo = { path = "crates/semweft-algo" }
+semweft-store = { path = "crates/semweft-store" }
+semweft-query = { path = "crates/semweft-query" }
+semweft-bench = { path = "crates/semweft-bench" }
+semweft-protocol = { path = "crates/semweft-protocol" }
+semweft-storage = { path = "crates/semweft-storage" }

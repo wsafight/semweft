@@ -1,0 +1,47 @@
+name: Rust checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --workspace
+      - run: cargo test --locked --workspace --all-features
+
+  desktop-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path crates/semweft-desktop/Cargo.toml -- --check
+      - run: cargo clippy --locked --manifest-path crates/semweft-desktop/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --locked --manifest-path crates/semweft-desktop/Cargo.toml
+
+  lsp-prototype:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-analyzer, rust-src
+      - run: cargo test --locked -p semweft-cli --test cli lsp_refresh_matches_cold_with_annotated_targets -- --ignored --nocapture
+      - run: cargo test --locked -p semweft-cli --test mvp trusted_daemon_publishes_l3_and_refreshes_references -- --ignored --nocapture

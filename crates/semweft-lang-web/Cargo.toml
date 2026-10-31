@@ -1,0 +1,11 @@
+[package]
+name = "semweft-lang-web"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+semweft-core.workspace = true
+tree-sitter.workspace = true
+tree-sitter-typescript = "0.23.2"
+tree-sitter-javascript = "0.25"

@@ -1,0 +1,129 @@
+{
+  "steps": [
+    {
+      "name": "body change in dependency",
+      "edits": [
+        {
+          "path": "src/inventory.rs",
+          "content": "pub struct Stock;\n\nimpl Stock {\n    pub fn reserve(&self, qty: u32) -> u32 {\n        if qty == 0 { 0 } else { qty - 1 }\n    }\n}\n\npub fn available() -> u32 { 10 }\n"
+        }
+      ]
+    },
+    {
+      "name": "signature change across files",
+      "edits": [
+        {
+          "path": "src/inventory.rs",
+          "content": "pub struct Stock;\n\nimpl Stock {\n    pub fn reserve(&self, qty: u32, enabled: bool) -> u32 {\n        if enabled { qty } else { 0 }\n    }\n}\n\npub fn available() -> u32 { 10 }\n"
+        },
+        {
+          "path": "src/order.rs",
+          "content": "use crate::inventory::{Stock, available};\n\npub fn create(stock: &Stock) -> u32 {\n    let _before = available();\n    stock.reserve(1, true)\n}\n"
+        },
+        {
+          "path": "src/lib.rs",
+          "content": "pub mod inventory;\npub mod order;\nuse inventory::Stock;\npub trait Deduct { fn deduct(&self, qty: u32) -> u32; }\nimpl Deduct for Stock { fn deduct(&self, qty: u32) -> u32 { self.reserve(qty, true) } }\npub fn dispatch(stock: &dyn Deduct) -> u32 { stock.deduct(1) }\n"
+        }
+      ]
+    },
+    {
+      "name": "add trait implementation and module",
+      "edits": [
+        {
+          "path": "src/alternate.rs",
+          "content": "use crate::{Deduct, inventory::Stock};\npub struct Alternate;\nimpl Deduct for Alternate {\n    fn deduct(&self, qty: u32) -> u32 { Stock.reserve(qty, true) }\n}\npub fn run() -> u32 { crate::order::create(&Stock) }\n"
+        },
+        {
+          "path": "src/lib.rs",
+          "content": "pub mod inventory;\npub mod order;\npub mod alternate;\nuse inventory::Stock;\npub trait Deduct { fn deduct(&self, qty: u32) -> u32; }\nimpl Deduct for Stock { fn deduct(&self, qty: u32) -> u32 { self.reserve(qty, true) } }\npub fn dispatch(stock: &dyn Deduct) -> u32 { stock.deduct(1) }\n"
+        }
+      ]
+    },
+    {
+      "name": "remove trait implementation and module",
+      "edits": [
+        {
+          "path": "src/alternate.rs",
+          "content": null
+        },
+        {
+          "path": "src/lib.rs",
+          "content": "pub mod inventory;\npub mod order;\nuse inventory::Stock;\npub trait Deduct { fn deduct(&self, qty: u32) -> u32; }\nimpl Deduct for Stock { fn deduct(&self, qty: u32) -> u32 { self.reserve(qty, true) } }\npub fn dispatch(stock: &dyn Deduct) -> u32 { stock.deduct(1) }\n"
+        }
+      ]
+    },
+    {
+      "name": "interrupted body edits that shift spans",
+      "fault": "interrupt_refresh",
+      "edits": [
+        {
+          "path": "src/lib.rs",
+          "replace": {
+            "old": "{ self.reserve(qty, true) }",
+            "new": "{\n        let reserved = self.reserve(qty, true);\n        reserved\n    }"
+          }
+        },
+        {
+          "path": "src/order.rs",
+          "replace": {
+            "old": "    stock.reserve(1, true)\n",
+            "new": "    let _total = crate::dispatch(stock);\n    stock.reserve(1, true)\n"
+          }
+        }
+      ]
+    },
+    {
+      "name": "body edit after interrupted refresh",
+      "edits": [
+        {
+          "path": "src/inventory.rs",
+          "replace": {
+            "old": "if enabled { qty } else { 0 }",
+            "new": "if enabled { qty.min(available()) } else { 0 }"
+          }
+        }
+      ]
+    },
+    {
+      "name": "add cfg-gated module during backend crash",
+      "fault": "crash_backend",
+      "edits": [
+        {
+          "path": "src/extra.rs",
+          "content": "#[cfg(feature = \"extra\")]\npub fn boost() -> u32 {\n    crate::inventory::available() + 1\n}\n"
+        },
+        {
+          "path": "src/lib.rs",
+          "replace": {
+            "old": "pub mod order;\n",
+            "new": "pub mod order;\npub mod extra;\n"
+          }
+        }
+      ]
+    },
+    {
+      "name": "enable Cargo feature",
+      "edits": [
+        {
+          "path": "Cargo.toml",
+          "replace": {
+            "old": "[workspace]",
+            "new": "[features]\ndefault = [\"extra\"]\nextra = []\n\n[workspace]"
+          }
+        }
+      ]
+    },
+    {
+      "name": "body-only line shift remaps reused targets",
+      "edits": [
+        {
+          "path": "src/lib.rs",
+          "replace": {
+            "old": "        let reserved = self.reserve(qty, true);\n",
+            "new": "        // Lines added here move every later declaration.\n\n        let reserved = self.reserve(qty, true);\n"
+          }
+        }
+      ]
+    }
+  ]
+}

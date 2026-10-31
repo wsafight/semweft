@@ -1,0 +1,35 @@
+[package]
+name = "semweft-query"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+go-experimental = ["dep:semweft-lang-go"]
+web-experimental = ["dep:semweft-lang-web"]
+
+[dependencies]
+semweft-protocol.workspace = true
+anyhow.workspace = true
+ignore.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+url.workspace = true
+semweft-core.workspace = true
+semweft-algo.workspace = true
+semweft-store.workspace = true
+semweft-lang-rust.workspace = true
+toml.workspace = true
+globset.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
+scip.workspace = true
+protobuf.workspace = true
+tiktoken-rs.workspace = true
+semweft-lang-go = { workspace = true, optional = true }
+semweft-lang-web = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

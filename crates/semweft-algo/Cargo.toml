@@ -1,0 +1,5 @@
+[package]
+name = "semweft-algo"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
