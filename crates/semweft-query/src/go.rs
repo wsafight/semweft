@@ -15,6 +15,58 @@ pub fn enabled(root: &Path) -> bool {
     cfg!(feature = "go-experimental") && !root.join("Cargo.toml").is_file() && is_project(root)
 }
 
+pub fn is_build_input(path: &str) -> bool {
+    matches!(
+        path.rsplit('.').next(),
+        Some("go" | "s" | "S" | "h" | "c" | "cc" | "cpp" | "m" | "mm" | "f" | "f90")
+    )
+}
+
+pub(crate) fn build_environment(resolved: &Resolved) -> Result<BTreeMap<String, Option<String>>> {
+    let mut environment = BTreeMap::new();
+    for name in [
+        "GOFLAGS",
+        "GOOS",
+        "GOARCH",
+        "CGO_ENABLED",
+        "GOWORK",
+        "GOTOOLCHAIN",
+        "GOENV",
+        "GOPATH",
+        "GOROOT",
+        "GOEXPERIMENT",
+    ] {
+        environment.insert(
+            name.into(),
+            std::env::var_os(name)
+                .map(|value| {
+                    value
+                        .into_string()
+                        .map_err(|_| anyhow::anyhow!("invalid_argument: {name} must be UTF-8"))
+                })
+                .transpose()?,
+        );
+    }
+    if let Some(tags) = &resolved.config.go.tags {
+        let tags: std::collections::BTreeSet<_> = tags.iter().collect();
+        environment.insert(
+            "GOFLAGS".into(),
+            Some(if tags.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "-tags={}",
+                    tags.into_iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }),
+        );
+    }
+    Ok(environment)
+}
+
 /// Tokenize go.mod/go.work directives, retaining quoted paths and comments.
 pub fn words(text: &str) -> Vec<String> {
     let mut out = vec![];
@@ -273,7 +325,11 @@ pub fn capture(resolved: &Resolved, backend: &str) -> Result<Capture> {
             if relative.ends_with("/go.mod") {
                 nested.push(relative.trim_end_matches("/go.mod").to_owned());
             }
-            if !(relative.ends_with(".go") || matches!(relative.as_str(), "go.mod" | "go.sum")) {
+            if !(is_build_input(&relative)
+                || relative.ends_with(".proto")
+                || matches!(relative.as_str(), "go.mod" | "go.sum")
+                || resolved.config.guard.path_globs()?.is_match(&key))
+            {
                 continue;
             }
             member_files.insert(
@@ -310,7 +366,9 @@ pub fn capture(resolved: &Resolved, backend: &str) -> Result<Capture> {
             SourceFile::new(serde_json::to_string(&maps)?),
         );
     }
-    diagnostics.push(Diagnostic{code:"go_experimental_scope".into(),file:None,message:"Go experimental: build tags, generated code, interface dispatch completeness and external consumers are not modeled; project refresh uses scip-go".into()});
+    diagnostics.push(Diagnostic{code:"go_experimental_scope".into(),file:None,message:"Go experimental: producer evaluates declared build tags; inactive callsites stay unresolved candidates. Generated code, interface dispatch completeness, external go env files/dependencies and external consumers are not fully modeled; project refresh uses scip-go".into()});
     Ok(Capture{manifest:Manifest{workspace_id:resolved.workspace_id.clone(),files,binary_files:BTreeMap::new(),analysis_versions:BTreeMap::from([
-        ("syntax".into(),crate::frontend::version()),("semantic".into(),backend.into()),("analysis_config".into(),resolved.analysis_hash()),("trust".into(),resolved.trusted()?.to_string()),("engine".into(),env!("CARGO_PKG_VERSION").into())]),scope:"Experimental Go module/workspace members; dependency source depth 0; build tags, generated code and external consumers excluded".into()},bytes:BTreeMap::new(),diagnostics})
+        ("go_build_environment".into(),serde_json::to_string(&build_environment(resolved)?)?),
+        ("service_mapping".into(),serde_json::to_string(&resolved.config.services)?),
+        ("syntax".into(),crate::frontend::version()),("semantic".into(),backend.into()),("analysis_config".into(),resolved.analysis_hash()),("architecture_policy".into(),serde_json::to_string(&resolved.config.architecture)?),("guard_policy".into(),serde_json::to_string(&resolved.config.guard)?),("contracts_policy".into(),serde_json::to_string(&resolved.config.contracts)?),("repository_revision".into(),crate::git::head_revision(root)),("trust".into(),resolved.trusted()?.to_string()),("engine".into(),env!("CARGO_PKG_VERSION").into())]),scope:"Experimental Go module/workspace members; dependency source depth 0; declared build tags evaluated by producer; generated code, exhaustive dispatch and external consumers excluded".into()},bytes:BTreeMap::new(),diagnostics})
 }

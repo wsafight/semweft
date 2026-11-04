@@ -1,4 +1,5 @@
 use crate::frontend::Frontends;
+use crate::sync::MutexExt;
 use crate::{
     config::{self, Resolved},
     lsp::{self, LspClient},
@@ -28,6 +29,7 @@ pub struct StoredView {
     pub reference_gaps: Arc<Vec<Diagnostic>>,
     pub namespaces: Arc<BTreeMap<String, String>>,
     index: Arc<OnceLock<IndexedView>>,
+    api_surface: Arc<OnceLock<crate::api_surface::Inventory>>,
     weight: Arc<AtomicUsize>,
     deriver: Arc<Mutex<RelationDeriver>>,
 }
@@ -93,6 +95,7 @@ impl StoredView {
             reference_gaps: Arc::new(reference_gaps),
             namespaces: Arc::new(namespaces),
             index: Arc::new(OnceLock::new()),
+            api_surface: Arc::new(OnceLock::new()),
             weight: Arc::new(AtomicUsize::new(weight)),
             deriver: Arc::new(Mutex::new(RelationDeriver::default())),
         }
@@ -106,14 +109,22 @@ impl StoredView {
     pub fn index(&self) -> &IndexedView {
         self.index.get_or_init(|| {
             let index = IndexedView::new(self.view.clone(), merged_relations(self));
-            self.weight.store(
-                self.weight
-                    .load(Ordering::Relaxed)
-                    .saturating_add(index.estimated_heap_bytes()),
-                Ordering::Relaxed,
-            );
+            self.weight
+                .fetch_add(index.estimated_heap_bytes(), Ordering::Relaxed);
             index
         })
+    }
+
+    pub(crate) fn api_surface(&self, deadline: Instant) -> Result<&crate::api_surface::Inventory> {
+        if let Some(inventory) = self.api_surface.get() {
+            return Ok(inventory);
+        }
+        let inventory = crate::api_surface::build(self, deadline)?;
+        let bytes = inventory.estimated_heap_bytes();
+        if self.api_surface.set(inventory).is_ok() {
+            self.weight.fetch_add(bytes, Ordering::Relaxed);
+        }
+        Ok(self.api_surface.get().unwrap())
     }
 }
 
@@ -317,6 +328,39 @@ fn view_key(view: &AnalysisView) -> String {
     )
 }
 
+#[derive(Debug)]
+struct InputsChanged;
+
+impl std::fmt::Display for InputsChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .write_str("index_refresh_failed: inputs changed during syntax analysis; retry refresh")
+    }
+}
+
+impl std::error::Error for InputsChanged {}
+
+fn retry_input_changes<Output>(
+    deadline: Instant,
+    mut scan: impl FnMut() -> Result<Output>,
+) -> Result<Output> {
+    loop {
+        crate::query::check_cancelled()?;
+        if Instant::now() >= deadline {
+            bail!("timeout: inputs did not stabilize within timeout_ms");
+        }
+        match scan() {
+            Err(error) if error.is::<InputsChanged>() => {
+                thread::sleep(
+                    Duration::from_millis(10)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            result => return result,
+        }
+    }
+}
+
 impl Engine {
     pub fn new(resolved: Resolved) -> Result<Arc<Self>> {
         let authorized = resolved.trusted()?;
@@ -388,7 +432,7 @@ impl Engine {
         });
         let worker = engine.clone();
         let handle = thread::spawn(move || worker.worker(receiver));
-        *engine.worker_handle.lock().unwrap() = Some(handle);
+        *engine.worker_handle.locked() = Some(handle);
         Ok(engine)
     }
 
@@ -443,7 +487,7 @@ impl Engine {
             })
             .collect();
         let result = commit(&mut store, latest, &borrowed);
-        state = self.state.lock().unwrap();
+        state = self.state.locked();
         // Failed commits retain reusable object caches and all dirty publications.
         state.store = store;
         result?;
@@ -464,7 +508,7 @@ impl Engine {
             let mut store = state.store.clone();
             drop(state);
             let result = store.gc_with_budget(keep_last.unwrap_or(usize::MAX), max_disk_bytes);
-            state = self.state.lock().unwrap();
+            state = self.state.locked();
             state.store = store;
             result?;
         }
@@ -484,7 +528,7 @@ impl Engine {
         })
     }
     pub fn invalidate_inputs(&self, paths: &[PathBuf], full: bool) {
-        self.capture_cache.lock().unwrap().invalidate(paths, full);
+        self.capture_cache.locked().invalidate(paths, full);
     }
     pub fn scan_incremental(&self) -> Result<Arc<AnalysisView>> {
         self.scan_using(false, true, |resolved, backend| {
@@ -500,9 +544,9 @@ impl Engine {
         semantic: bool,
         mut capture: impl FnMut(&Resolved, &str) -> Result<workspace::Capture>,
     ) -> Result<Arc<AnalysisView>> {
-        let _writer = self.writer.lock().unwrap();
+        let _writer = self.writer.locked();
         let (previous_config, backend) = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.locked();
             (state.resolved.clone(), state.backend.clone())
         };
         let updated = config::resolve(
@@ -524,10 +568,10 @@ impl Engine {
         if verified.manifest != captured.manifest
             || checked_config.analysis_hash() != updated.analysis_hash()
         {
-            bail!("index_refresh_failed: inputs changed during syntax analysis; retry refresh");
+            return Err(InputsChanged.into());
         }
         let trusted = updated.trusted()?;
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         state.resolved = updated;
         let limits = (
             state.resolved.config.index.query_cache_views,
@@ -535,9 +579,9 @@ impl Engine {
         );
         state.query_views.set_limits(limits.0, limits.1);
         if !trusted {
-            self.execution.lock().unwrap().cancel();
+            self.execution.locked().cancel();
         } else if !state.authorized {
-            *self.execution.lock().unwrap() = Arc::new(lsp::Cancellation::default());
+            *self.execution.locked() = Arc::new(lsp::Cancellation::default());
         }
         state.authorized = trusted;
         syntax.diagnostics.extend(captured.diagnostics);
@@ -615,12 +659,12 @@ impl Engine {
     /// A successful revoke acknowledges that the worker has released its LSP
     /// client and reaped the process tree, including an in-flight initialization.
     pub fn trust_changed(&self) -> Result<()> {
-        let _control = self.trust_control.lock().unwrap();
-        let resolved = self.state.lock().unwrap().resolved.clone();
+        let _control = self.trust_control.locked();
+        let resolved = self.state.locked().resolved.clone();
         if !resolved.trusted()? {
-            self.execution.lock().unwrap().cancel();
+            self.execution.locked().cancel();
             {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.locked();
                 state.authorized = false;
                 state.force_refresh = false;
                 state.index_completed = state.index_requested;
@@ -639,10 +683,10 @@ impl Engine {
     }
 
     pub fn shutdown(&self) {
-        self.execution.lock().unwrap().cancel();
-        self.state.lock().unwrap().authorized = false;
+        self.execution.locked().cancel();
+        self.state.locked().authorized = false;
         let _ = self.wake.send(WorkerControl::Shutdown);
-        if let Some(handle) = self.worker_handle.lock().unwrap().take() {
+        if let Some(handle) = self.worker_handle.locked().take() {
             let _ = handle.join();
         }
     }
@@ -659,9 +703,9 @@ impl Engine {
                 }
                 WorkerControl::Refresh => {}
             }
-            let execution = self.execution.lock().unwrap().clone();
+            let execution = self.execution.locked().clone();
             let (root, trusted) = {
-                let state = self.state.lock().unwrap();
+                let state = self.state.locked();
                 (
                     state.resolved.root.clone(),
                     state.resolved.trusted().unwrap_or(false),
@@ -672,7 +716,7 @@ impl Engine {
                 continue;
             }
             {
-                let state = self.state.lock().unwrap();
+                let state = self.state.locked();
                 if !state.force_refresh
                     && state
                         .coordinator
@@ -682,20 +726,18 @@ impl Engine {
                     continue;
                 }
             }
-            self.state.lock().unwrap().refreshing = true;
+            self.state.locked().refreshing = true;
             let started = Instant::now();
             let result = (|| -> Result<()> {
                 if crate::web::enabled(&root) {
-                    bail!(
-                        "capability_unsupported: TS/JS resident semantic analysis is unavailable; use syntax-only or import a verified SCIP index"
-                    );
+                    return self.refresh_project_scip(true);
                 }
                 if crate::go::enabled(&root) {
                     return self.refresh_go();
                 }
-                let _semantic = self.semantic_gate.lock().unwrap();
+                let _semantic = self.semantic_gate.locked();
                 {
-                    let state = self.state.lock().unwrap();
+                    let state = self.state.locked();
                     if !state.force_refresh
                         && state
                             .coordinator
@@ -709,7 +751,7 @@ impl Engine {
                     client = None;
                     let backend = lsp::version_cancellable(&self.executable, &root, &execution)?;
                     let changed = {
-                        let mut state = self.state.lock().unwrap();
+                        let mut state = self.state.locked();
                         let changed = state.backend != backend;
                         state.backend = backend;
                         changed
@@ -725,7 +767,7 @@ impl Engine {
                     )?);
                 }
                 let (view, plan, ticket, backend, index_goal) = {
-                    let mut state = self.state.lock().unwrap();
+                    let mut state = self.state.locked();
                     let Some(view) = state.coordinator.latest() else {
                         return Ok(());
                     };
@@ -765,7 +807,7 @@ impl Engine {
                 };
                 let snapshot = &view.snapshot;
                 let mut cancel = || {
-                    let state = self.state.lock().unwrap();
+                    let state = self.state.locked();
                     !state.authorized
                         || state
                             .coordinator
@@ -796,15 +838,15 @@ impl Engine {
                 };
                 // Cargo can write lockfiles while loading; never publish against changed inputs.
                 let disk = {
-                    let state = self.state.lock().unwrap();
+                    let state = self.state.locked();
                     workspace::capture_config(&state.resolved, &backend)?
                 };
                 if disk.manifest.input_hash() != snapshot.input_hash {
                     self.scan(false)?;
                     return Ok(());
                 }
-                let _writer = self.writer.lock().unwrap();
-                let mut state = self.state.lock().unwrap();
+                let _writer = self.writer.locked();
+                let mut state = self.state.locked();
                 if !state.authorized || execution.is_cancelled() {
                     return Ok(());
                 }
@@ -828,7 +870,7 @@ impl Engine {
                 }
                 Ok(())
             })();
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.locked();
             state.refreshing = false;
             state.last_refresh_ms = started.elapsed().as_millis() as u64;
             if execution.is_cancelled() {
@@ -879,7 +921,7 @@ impl Engine {
             .unwrap_or(2_000.min(args["timeout_ms"].as_u64().unwrap_or(5_000) / 2));
         let started = Instant::now();
         let wait_deadline = deadline.min(started + Duration::from_millis(wait_ms));
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         let mut view = state.choose_view(args)?;
         let mut reason = None;
         if requested && !view.pending_units.is_empty() {
@@ -923,8 +965,8 @@ impl Engine {
     }
 
     pub fn snapshots(&self, args: &Value) -> Result<Value> {
-        let _writer = self.writer.lock().unwrap();
-        let state = self.state.lock().unwrap();
+        let _writer = self.writer.locked();
+        let state = self.state.locked();
         let max_disk_bytes =
             args["max_bytes"]
                 .as_u64()
@@ -967,12 +1009,12 @@ impl Engine {
                 _ => bail!("invalid_argument: unknown snapshot operation"),
             }
         })();
-        self.state.lock().unwrap().store = store;
+        self.state.locked().store = store;
         result
     }
 
     pub fn status(&self, args: &Value) -> Result<Value> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         let view = if let Some(id) = args["snapshot_id"].as_str() {
             Some(state.choose_view(&json!({"snapshot_id":id}))?)
         } else {
@@ -1004,7 +1046,8 @@ impl Engine {
             return self.import_scip(args, deadline);
         }
         let syntax_only = args["syntax_only"].as_bool() == Some(true);
-        let initial = self.scan_inner(!syntax_only, !syntax_only)?;
+        let initial =
+            retry_input_changes(deadline, || self.scan_inner(!syntax_only, !syntax_only))?;
         if args["syntax_only"].as_bool() == Some(true) {
             let mut result = self.status(&json!({"snapshot_id":initial.snapshot.snapshot_id}))?;
             if args["export_manifest"] == true {
@@ -1012,12 +1055,12 @@ impl Engine {
             }
             return Ok(result);
         }
-        if !self.state.lock().unwrap().resolved.trusted()? {
+        if !self.state.locked().resolved.trusted()? {
             bail!(
                 "trust_required: index L3 may execute Cargo build scripts and procedural macros; run semweft trust --accept-build-execution or index --syntax-only"
             );
         }
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         let goal = state.index_requested;
         loop {
             crate::query::check_cancelled()?;
@@ -1036,7 +1079,7 @@ impl Engine {
                 drop(state);
                 let mut result = self.status(&json!({}))?;
                 if args["export_manifest"] == true {
-                    let state = self.state.lock().unwrap();
+                    let state = self.state.locked();
                     result["source_manifest"] =
                         crate::scip::source_manifest(&state.coordinator.latest().unwrap().snapshot);
                 }
@@ -1066,8 +1109,11 @@ impl Engine {
         };
         let index_goal = args["index_goal"]
             .as_u64()
-            .unwrap_or_else(|| self.state.lock().unwrap().index_requested);
-        let (index, backend) = crate::scip::load(Path::new(args["scip"].as_str().unwrap()))?;
+            .unwrap_or_else(|| self.state.locked().index_requested);
+        let scip = args["scip"]
+            .as_str()
+            .context("invalid_argument: SCIP index path required")?;
+        let (index, backend) = crate::scip::load(Path::new(scip))?;
         let expected: Value = serde_json::from_slice(&fs::read(
             args["scip_manifest"]
                 .as_str()
@@ -1083,7 +1129,7 @@ impl Engine {
         // import must not displace a valid semantic view of the same sources.
         let (mut batch, references, gaps) =
             crate::scip::analyze(&index, &initial.snapshot, &backend, deadline)?;
-        self.state.lock().unwrap().backend = backend.clone();
+        self.state.locked().backend = backend.clone();
         let view = self.scan_inner(false, false)?;
         if crate::scip::source_manifest(&view.snapshot) != expected {
             bail!("content_mismatch: inputs changed during SCIP import");
@@ -1102,7 +1148,7 @@ impl Engine {
             bail!("timeout: SCIP import exceeded query deadline");
         }
         let disk = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.locked();
             workspace::capture_config(&state.resolved, &backend)?
         };
         if crate::scip::source_manifest(&Snapshot {
@@ -1112,8 +1158,8 @@ impl Engine {
         {
             bail!("content_mismatch: disk inputs changed during SCIP import");
         }
-        let _writer = self.writer.lock().unwrap();
-        let mut state = self.state.lock().unwrap();
+        let _writer = self.writer.locked();
+        let mut state = self.state.locked();
         let published = state
             .coordinator
             .complete(&ticket, batch)
@@ -1135,14 +1181,18 @@ impl Engine {
     }
 
     fn refresh_go(&self) -> Result<()> {
+        self.refresh_project_scip(false)
+    }
+
+    fn refresh_project_scip(&self, web: bool) -> Result<()> {
         let (root, view, goal) = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.locked();
             (
                 state.resolved.root.clone(),
                 state
                     .coordinator
                     .latest()
-                    .context("index_refresh_failed: no Go inputs")?,
+                    .context("index_refresh_failed: no project inputs")?,
                 state.index_requested,
             )
         };
@@ -1153,37 +1203,54 @@ impl Engine {
             &manifest_path,
             serde_json::to_vec(&crate::scip::source_manifest(&view.snapshot))?,
         )?;
-        let executable = std::env::var_os("SEMWEFT_SCIP_GO").unwrap_or_else(|| "scip-go".into());
+        let executable = if web {
+            std::env::var_os("SEMWEFT_SCIP_TYPESCRIPT").unwrap_or_else(|| "scip-typescript".into())
+        } else {
+            std::env::var_os("SEMWEFT_SCIP_GO").unwrap_or_else(|| "scip-go".into())
+        };
+        let mut command = std::process::Command::new(executable);
+        command.current_dir(&root);
+        if web {
+            command.arg("index");
+        } else {
+            command.env("GOPROXY", "off").env("GOSUMDB", "off");
+            let environment: BTreeMap<String, Option<String>> = serde_json::from_str(
+                view.snapshot
+                    .manifest
+                    .analysis_versions
+                    .get("go_build_environment")
+                    .context("index_refresh_failed: Go build environment was not captured")?,
+            )?;
+            for (name, value) in environment {
+                if let Some(value) = value {
+                    command.env(name, value);
+                } else {
+                    command.env_remove(name);
+                }
+            }
+        }
+        command.arg("--output").arg(&output_path);
         let deadline = Instant::now() + Duration::from_secs(60);
-        let Some(output) = crate::process::output_cancellable(
-            std::process::Command::new(executable)
-                .current_dir(&root)
-                .env("GOPROXY", "off")
-                .env("GOSUMDB", "off")
-                .arg("--output")
-                .arg(&output_path),
-            deadline,
-            || {
-                let state = self.state.lock().unwrap();
-                !state.authorized
-                    || !state.resolved.trusted().unwrap_or(false)
-                    || state
-                        .coordinator
-                        .latest()
-                        .is_none_or(|v| v.snapshot.snapshot_id != view.snapshot.snapshot_id)
-            },
-        )?
+        let Some(output) = crate::process::output_cancellable(&mut command, deadline, || {
+            let state = self.state.locked();
+            !state.authorized
+                || !state.resolved.trusted().unwrap_or(false)
+                || state
+                    .coordinator
+                    .latest()
+                    .is_none_or(|v| v.snapshot.snapshot_id != view.snapshot.snapshot_id)
+        })?
         else {
             return Ok(());
         };
         if !output.status.success() {
             bail!(
-                "index_refresh_failed: scip-go project rebuild failed: {}",
+                "index_refresh_failed: project SCIP rebuild failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
         }
         {
-            let state = self.state.lock().unwrap();
+            let state = self.state.locked();
             if !state.resolved.trusted()?
                 || state
                     .coordinator
@@ -1201,18 +1268,18 @@ impl Engine {
     }
 
     pub fn historical(&self, id: &str, epoch: Option<u64>) -> Result<StoredView> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         let view = state.choose_view(&json!({"snapshot_id":id,"semantic_epoch":epoch}))?;
         state.stored_view(view)
     }
 
     pub fn publish_revision(&self, manifest: Manifest) -> Result<StoredView> {
         // Revision syntax views use the same monotonic epoch allocator and persistence.
-        let _writer = self.writer.lock().unwrap();
-        let mut state = self.state.lock().unwrap();
+        let _writer = self.writer.locked();
+        let mut state = self.state.locked();
         if let Some(version) = state.store.reusable(&manifest) {
             let view = state.load_version(&version)?;
-            return state.stored_view(view);
+            return self.reuse_revision(state, view, manifest);
         }
         if let Some(view) = state
             .coordinator
@@ -1225,10 +1292,17 @@ impl Engine {
                     && v.snapshot.manifest.binary_files == manifest.binary_files
                     && v.snapshot.manifest.analysis_versions.get("analysis_config")
                         == manifest.analysis_versions.get("analysis_config")
+                    && v.snapshot.manifest.analysis_versions.get("syntax")
+                        == manifest.analysis_versions.get("syntax")
+                    && v.snapshot
+                        .manifest
+                        .analysis_versions
+                        .get("go_build_environment")
+                        == manifest.analysis_versions.get("go_build_environment")
             })
             .cloned()
         {
-            return state.stored_view(view);
+            return self.reuse_revision(state, view, manifest);
         }
         if let Some(view) = state
             .coordinator
@@ -1247,7 +1321,7 @@ impl Engine {
             .unwrap()
             .analyze(&manifest)
             .map_err(anyhow::Error::msg)?;
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         let old = state.coordinator.latest();
         let view = state
             .coordinator
@@ -1281,6 +1355,84 @@ impl Engine {
         {
             let _ = self.wake.send(WorkerControl::Refresh);
         }
+        Ok(stored)
+    }
+
+    fn reuse_revision(
+        &self,
+        mut state: MutexGuard<'_, State>,
+        view: Arc<AnalysisView>,
+        mut manifest: Manifest,
+    ) -> Result<StoredView> {
+        let previous_mapping =
+            serde_json::to_value(crate::services::configured(&view.snapshot.manifest)?)?;
+        let desired_mapping = serde_json::to_value(crate::services::configured(&manifest)?)?;
+        if previous_mapping == desired_mapping {
+            return state.stored_view(view);
+        }
+        let source = state.stored_view(view.clone())?;
+        let previous = state.coordinator.latest();
+        if let Some(backend) = view.snapshot.manifest.analysis_versions.get("semantic") {
+            manifest
+                .analysis_versions
+                .insert("semantic".into(), backend.clone());
+        }
+        manifest.analysis_versions.insert(
+            "semantic_reused_from".into(),
+            view.snapshot.snapshot_id.clone(),
+        );
+        let mut rebound = state
+            .coordinator
+            .publish_inputs(manifest, view.snapshot.syntax.clone())
+            .map_err(anyhow::Error::msg)?;
+        if view.epochs.semantic_epoch == view.epochs.syntax_epoch {
+            let ticket = state
+                .coordinator
+                .begin_refresh()
+                .map_err(anyhow::Error::msg)?;
+            rebound = state
+                .coordinator
+                .complete(
+                    &ticket,
+                    SemanticBatch {
+                        snapshot_id: rebound.snapshot.snapshot_id.clone(),
+                        syntax_epoch: rebound.epochs.syntax_epoch,
+                        input_hash: rebound.snapshot.input_hash.clone(),
+                        backend: rebound
+                            .snapshot
+                            .manifest
+                            .analysis_versions
+                            .get("semantic")
+                            .cloned()
+                            .unwrap_or_default(),
+                        resolutions: view.resolutions.clone(),
+                        diagnostics: view.known_gaps.clone(),
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+        }
+        let stored = StoredView::new(
+            rebound.clone(),
+            source.references.as_ref().clone(),
+            source.reference_gaps.as_ref().clone(),
+        )
+        .with_deriver(state.deriver.clone());
+        state.set_extra(
+            &rebound,
+            stored.references.as_ref().clone(),
+            stored.reference_gaps.as_ref().clone(),
+        );
+        state.query_views.insert(stored.clone());
+        if let Some(previous) = previous {
+            state
+                .coordinator
+                .select_latest(
+                    &previous.snapshot.snapshot_id,
+                    previous.epochs.semantic_epoch,
+                )
+                .map_err(anyhow::Error::msg)?;
+        }
+        drop(self.persist(state)?);
         Ok(stored)
     }
 }
@@ -1597,6 +1749,102 @@ mod index_tests {
     use super::*;
 
     #[test]
+    fn index_retries_only_transient_input_changes() {
+        let mut attempts = 0;
+        let result = retry_input_changes(Instant::now() + Duration::from_secs(2), || {
+            attempts += 1;
+            if attempts < 4 {
+                Err(InputsChanged.into())
+            } else {
+                Ok("stable")
+            }
+        })
+        .unwrap();
+        assert_eq!(result, "stable");
+        assert_eq!(attempts, 4);
+    }
+
+    #[test]
+    fn index_does_not_retry_permanent_refresh_errors() {
+        let mut attempts = 0;
+        let result: Result<()> =
+            retry_input_changes(Instant::now() + Duration::from_secs(2), || {
+                attempts += 1;
+                bail!("index_refresh_failed: invalid fixture");
+            });
+        assert!(result.unwrap_err().to_string().contains("invalid fixture"));
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn expired_index_does_not_start_a_scan() {
+        let result: Result<()> = retry_input_changes(Instant::now(), || panic!("expired scan ran"));
+        assert!(result.unwrap_err().to_string().starts_with("timeout:"));
+    }
+
+    #[test]
+    fn continuously_changing_index_inputs_respect_the_deadline() {
+        let started = Instant::now();
+        let mut attempts = 0;
+        let result: Result<()> = retry_input_changes(started + Duration::from_millis(40), || {
+            attempts += 1;
+            Err(InputsChanged.into())
+        });
+        assert!(result.unwrap_err().to_string().starts_with("timeout:"));
+        assert!(attempts > 0);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn retained_semantics_require_matching_go_build_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        let resolved = Resolved {
+            root: temp.path().into(),
+            config_path: None,
+            config: config::Config::default(),
+            workspace_id: "cache-tests".into(),
+            cache: temp.path().join("cache"),
+            index_dir: temp.path().join("index"),
+            config_dir: temp.path().join("config"),
+        };
+        let engine = Engine::new(resolved).unwrap();
+        let mut held = stored("build-context", 100);
+        let view = Arc::make_mut(&mut held.view);
+        let snapshot = Arc::make_mut(&mut view.snapshot);
+        snapshot
+            .manifest
+            .analysis_versions
+            .insert("go_build_environment".into(), "one".into());
+        snapshot.input_hash = snapshot.manifest.input_hash();
+        let original = snapshot.manifest.clone();
+        {
+            let mut state = engine.state.locked();
+            state.coordinator = RefreshCoordinator::restore(vec![held.view.clone()]).unwrap();
+            state.set_extra(&held.view, vec![], vec![]);
+        }
+        assert_eq!(
+            engine
+                .publish_revision(original.clone())
+                .unwrap()
+                .view
+                .snapshot
+                .snapshot_id,
+            "build-context"
+        );
+        let mut changed = original;
+        changed
+            .analysis_versions
+            .insert("go_build_environment".into(), "two".into());
+        let historical = engine.publish_revision(changed).unwrap();
+        assert_ne!(historical.view.snapshot.snapshot_id, "build-context");
+        assert_ne!(
+            historical.view.epochs.semantic_epoch,
+            historical.view.epochs.syntax_epoch
+        );
+        engine.shutdown();
+    }
+
+    #[test]
     fn cache_enforces_byte_budget_and_rechecks_lazy_index_growth() {
         let first = stored("bytes-a", 0);
         let second = stored("bytes-b", 0);
@@ -1632,8 +1880,8 @@ mod index_tests {
             config_dir: temp.path().join("config"),
         };
         let engine = Engine::new(resolved).unwrap();
-        let _writer = engine.writer.lock().unwrap();
-        let mut state = engine.state.lock().unwrap();
+        let _writer = engine.writer.locked();
+        let mut state = engine.state.locked();
         let held = stored("concurrent", 0);
         state.coordinator = RefreshCoordinator::restore(vec![held.view.clone()]).unwrap();
         state.set_extra(&held.view, vec![], vec![]);
@@ -1642,7 +1890,7 @@ mod index_tests {
             bail!("injected disk error")
         });
         assert!(failed.is_err());
-        let state = engine.state.lock().unwrap();
+        let state = engine.state.locked();
         assert!(!state.dirty_extra.is_empty());
         let state = engine
             .persist_using(state, |store, latest, updates| {
@@ -1650,7 +1898,7 @@ mod index_tests {
                 std::thread::scope(|scope| {
                     scope
                         .spawn(|| {
-                            let mut state = engine.state.lock().unwrap();
+                            let mut state = engine.state.locked();
                             assert_eq!(
                                 state
                                     .stored_view(held.view.clone())
@@ -1733,6 +1981,24 @@ mod index_tests {
                 .snapshot
                 .snapshot_id,
             first.snapshot.snapshot_id
+        );
+        let mut captures = 0;
+        let stable = retry_input_changes(Instant::now() + Duration::from_secs(2), || {
+            engine.scan_using(false, false, |resolved, backend| {
+                let captured = workspace::capture_config(resolved, backend)?;
+                captures += 1;
+                if captures == 1 {
+                    fs::write(temp.path().join("src/lib.rs"), "pub fn stable() {}\n")?;
+                }
+                Ok(captured)
+            })
+        })
+        .unwrap();
+        assert_eq!(captures, 4);
+        assert_ne!(stable.snapshot.snapshot_id, first.snapshot.snapshot_id);
+        assert_eq!(
+            stable.snapshot.manifest.files["src/lib.rs"].content,
+            "pub fn stable() {}\n"
         );
         engine.shutdown();
     }

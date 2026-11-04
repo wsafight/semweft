@@ -1,3 +1,4 @@
+use crate::sync::MutexExt;
 use crate::{
     engine::StoredView,
     query::{self, QueryService},
@@ -13,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn command(root: &Path) -> Command {
+pub(crate) fn command(root: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(root).args([
         "-c",
@@ -24,6 +25,15 @@ fn command(root: &Path) -> Command {
         "diff.external=",
     ]);
     cmd
+}
+pub(crate) fn head_revision(root: &Path) -> String {
+    command(root)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .unwrap_or_else(|| "unavailable".into())
 }
 fn run(root: &Path, args: &[&str]) -> Result<String> {
     let output = command(root)
@@ -81,7 +91,7 @@ pub fn diff_selectors(root: &Path, spec: &str) -> Result<Value> {
 }
 
 fn capture_revision(service: &QueryService, sha: &str, deadline: Instant) -> Result<StoredView> {
-    let resolved = service.engine.state.lock().unwrap().resolved.clone();
+    let resolved = service.engine.state.locked().resolved.clone();
     let root = &resolved.root;
     let prefix = run(root, &["rev-parse", "--show-prefix"])?;
     let output = command(root)
@@ -91,6 +101,22 @@ fn capture_revision(service: &QueryService, sha: &str, deadline: Instant) -> Res
         bail!("invalid_argument: cannot read revision tree");
     }
     let exclude = crate::config::exclusions(&resolved.config.workspace.exclude)?;
+    let protected = resolved.config.guard.path_globs()?;
+    let historical_config = run(
+        &resolved.root,
+        &["show", &format!("{sha}:{prefix}semweft.toml")],
+    )
+    .ok();
+    let historical_config = historical_config
+        .as_deref()
+        .map(toml::from_str::<crate::config::Config>);
+    // An unparsable historical config must not silently shrink guard coverage: record it.
+    let historical_config_unparsed = matches!(historical_config, Some(Err(_)));
+    let historical_protected = historical_config
+        .and_then(Result::ok)
+        .map(|config| config.guard.path_globs())
+        .transpose()?
+        .unwrap_or_else(globset::GlobSet::empty);
     let mut objects = vec![];
     for entry in output.stdout.split(|b| *b == 0).filter(|e| !e.is_empty()) {
         let text = std::str::from_utf8(entry).context("invalid_argument: non-UTF-8 Git path")?;
@@ -125,6 +151,14 @@ fn capture_revision(service: &QueryService, sha: &str, deadline: Instant) -> Res
             continue;
         }
         if crate::web::is_source(path)
+            || path.ends_with(".proto")
+            || protected.is_match(path)
+            || historical_protected.is_match(path)
+            || (cfg!(feature = "web-experimental")
+                && path.rsplit('/').next().is_some_and(|name| {
+                    (name.starts_with("tsconfig") || name.starts_with("jsconfig"))
+                        && name.ends_with(".json")
+                }))
             || (cfg!(feature = "web-experimental")
                 && matches!(
                     path.rsplit('/').next(),
@@ -139,7 +173,7 @@ fn capture_revision(service: &QueryService, sha: &str, deadline: Instant) -> Res
                 ))
             || path.ends_with(".rs")
             || (cfg!(feature = "go-experimental")
-                && (path.ends_with(".go")
+                && (crate::go::is_build_input(path)
                     || matches!(
                         path.rsplit('/').next(),
                         Some("go.mod" | "go.sum" | "go.work" | "go.work.sum")
@@ -309,11 +343,25 @@ fn capture_revision(service: &QueryService, sha: &str, deadline: Instant) -> Res
             .filter(|d| d.is_empty() || path.starts_with(&format!("{d}/")))
             .max_by_key(|d| d.len());
         crate::web::is_source(path)
+            || path.ends_with(".proto")
+            || protected.is_match(path)
+            || historical_protected.is_match(path)
             || owner.is_some_and(|d| member_paths.contains(d))
             || (!path.contains('/') && !path.ends_with(".rs") && !path.ends_with(".go"))
             || path == ".cargo/config.toml"
     });
-    let manifest=Manifest {workspace_id:resolved.workspace_id.clone(),files,binary_files:BTreeMap::new(),analysis_versions:BTreeMap::from([("syntax".into(),crate::frontend::version()),("semantic".into(),"not_enabled".into()),("trust".into(),"false".into()),("analysis_config".into(),resolved.analysis_hash()),("revision".into(),sha.into()),("engine".into(),env!("CARGO_PKG_VERSION").into())]),scope:"Git revision workspace members; reuse matching captured L3 when available, otherwise syntax candidates; external consumers and macro expansion excluded".into()};
+    let mut manifest=Manifest {workspace_id:resolved.workspace_id.clone(),files,binary_files:BTreeMap::new(),analysis_versions:BTreeMap::from([("syntax".into(),crate::frontend::version()),("semantic".into(),"not_enabled".into()),("trust".into(),"false".into()),("analysis_config".into(),resolved.analysis_hash()),("revision".into(),sha.into()),("engine".into(),env!("CARGO_PKG_VERSION").into())]),scope:"Git revision workspace members; reuse matching captured L3 under the current analysis/build environment when available, otherwise syntax candidates; external consumers and macro expansion excluded".into()};
+    if historical_config_unparsed {
+        manifest
+            .analysis_versions
+            .insert("historical_guard_config".into(), "unparsed".into());
+    }
+    if go {
+        manifest.analysis_versions.insert(
+            "go_build_environment".into(),
+            serde_json::to_string(&crate::go::build_environment(&resolved)?)?,
+        );
+    }
     service.engine.publish_revision(manifest)
 }
 fn select(
@@ -327,19 +375,33 @@ fn select(
         .context("invalid_argument: selector must be an object")?;
     match selector["kind"].as_str() {
         Some("revision") if keys.len() == 2 && keys.contains_key("revision") => {
-            let root = service.engine.state.lock().unwrap().resolved.root.clone();
+            let root = service.engine.state.locked().resolved.root.clone();
             let sha = revision(&root, selector["revision"].as_str().unwrap())?;
             capture_revision(service, &sha, deadline)
         }
         Some("snapshot")
             if keys.contains_key("snapshot_id")
-                && keys.len() <= 3
+                && keys.len() <= 4
                 && !keys.contains_key("revision") =>
         {
-            service.engine.historical(
+            let stored = service.engine.historical(
                 selector["snapshot_id"].as_str().unwrap(),
                 selector["semantic_epoch"].as_u64(),
-            )
+            )?;
+            if let Some(commit) = selector["commit_context"].as_str() {
+                let root = service.engine.state.locked().resolved.root.clone();
+                let commit = revision(&root, commit)?;
+                let context = capture_revision(service, &commit, deadline)?;
+                if context.view.snapshot.manifest.files != stored.view.snapshot.manifest.files
+                    || context.view.snapshot.manifest.binary_files
+                        != stored.view.snapshot.manifest.binary_files
+                {
+                    bail!(
+                        "content_mismatch: commit context does not match the selected snapshot inputs"
+                    );
+                }
+            }
+            Ok(stored)
         }
         Some("workspace") if !base && keys.len() == 1 => {
             service.engine.scan(false)?;
@@ -502,19 +564,23 @@ pub fn impact(service: &QueryService, args: &Value, deadline: Instant) -> Result
         let keys = selector.as_object().unwrap();
         match selector["kind"].as_str() {
             Some("revision") if keys.len() == 2 && keys.contains_key("revision") => {
-                let root = service.engine.state.lock().unwrap().resolved.root.clone();
+                let root = service.engine.state.locked().resolved.root.clone();
                 selector["revision"] =
                     json!(revision(&root, selector["revision"].as_str().unwrap())?);
             }
             Some("snapshot")
                 if keys.contains_key("snapshot_id")
-                    && keys.len() <= 3
+                    && keys.len() <= 4
                     && !keys.contains_key("revision") =>
             {
                 service.engine.historical(
                     selector["snapshot_id"].as_str().unwrap(),
                     selector["semantic_epoch"].as_u64(),
                 )?;
+                if let Some(commit) = selector["commit_context"].as_str() {
+                    let root = service.engine.state.locked().resolved.root.clone();
+                    selector["commit_context"] = json!(revision(&root, commit)?);
+                }
             }
             Some("workspace") if side == "head" && keys.len() == 1 => {}
             _ => bail!("invalid_argument: invalid diff selector"),
@@ -545,6 +611,75 @@ pub fn impact(service: &QueryService, args: &Value, deadline: Instant) -> Result
     let (base, base_fresh) = bind_side(base_input, "base")?;
     let mut result = query::envelope(&head, fresh.clone());
     result["snapshots"] = json!({"base":{"snapshot_id":base.view.snapshot.snapshot_id,"epochs":{"syntax":base.view.epochs.syntax_epoch,"semantic":base.view.epochs.semantic_epoch},"fresh_requirement":base_fresh},"head":{"snapshot_id":head.view.snapshot.snapshot_id,"epochs":{"syntax":head.view.epochs.syntax_epoch,"semantic":head.view.epochs.semantic_epoch},"fresh_requirement":fresh}});
+    for (side, stored) in [("base", &base), ("head", &head)] {
+        let analysis_commit = stored
+            .view
+            .snapshot
+            .manifest
+            .analysis_versions
+            .get("revision")
+            .or_else(|| {
+                stored
+                    .view
+                    .snapshot
+                    .manifest
+                    .analysis_versions
+                    .get("repository_revision")
+            })
+            .filter(|commit| {
+                matches!(commit.len(), 40 | 64)
+                    && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            });
+        result["snapshots"][side]["analysis_commit"] = json!(analysis_commit);
+        result["snapshots"][side]["semantic_reused_from"] = json!(
+            stored
+                .view
+                .snapshot
+                .manifest
+                .analysis_versions
+                .get("semantic_reused_from")
+        );
+        result["snapshots"][side]["commit"] = json!(
+            selectors[side]["revision"]
+                .as_str()
+                .or_else(|| selectors[side]["commit_context"].as_str())
+                .map(str::to_owned)
+                .or_else(|| analysis_commit.cloned())
+                .filter(|commit| matches!(commit.len(), 40 | 64)
+                    && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        );
+    }
+    let mut file_changes = vec![];
+    for path in base
+        .view
+        .snapshot
+        .manifest
+        .files
+        .keys()
+        .chain(head.view.snapshot.manifest.files.keys())
+        .collect::<BTreeSet<_>>()
+    {
+        check_diff_budget(deadline)?;
+        let before = base
+            .view
+            .snapshot
+            .manifest
+            .files
+            .get(path)
+            .map(|file| &file.file_hash);
+        let after = head
+            .view
+            .snapshot
+            .manifest
+            .files
+            .get(path)
+            .map(|file| &file.file_hash);
+        if before != after {
+            file_changes.push(json!({"path":path,"base_hash":before,"head_hash":after}));
+        }
+    }
+    result["diff_identity"] = json!({"digest":identity("diff", &[&serde_json::to_string(&file_changes)?]),"files":file_changes,
+        "basis":"captured file content hashes; excluded and uncaptured inputs are not included"});
     result["fresh_requirement"]["satisfied"] =
         json!(fresh["satisfied"] == true && base_fresh["satisfied"] == true);
     result["fresh_requirement"]["waited_ms"] = json!(
@@ -644,7 +779,7 @@ pub fn impact(service: &QueryService, args: &Value, deadline: Instant) -> Result
     for occurrence in &head.view.snapshot.syntax.occurrences {
         check_diff_budget(deadline)?;
         if old_names.contains(occurrence.name.as_str()) {
-            residual.push(json!({"name":occurrence.name,"kind":occurrence.kind,"location":{"file":occurrence.file,"line":occurrence.span.start.line,"column":occurrence.span.start.column,"file_hash":head.view.snapshot.manifest.files[&occurrence.file].file_hash},"source":"L1","certainty":"candidate","reason":"old target name remains after deletion, rename or move; lexical binding and migration status are unresolved"}));
+            residual.push(json!({"name":occurrence.name,"kind":occurrence.kind,"side":"head","location":{"file":occurrence.file,"line":occurrence.span.start.line,"column":occurrence.span.start.column,"file_hash":head.view.snapshot.manifest.files[&occurrence.file].file_hash,"coordinate_snapshot_id":head.view.snapshot.snapshot_id},"source":"L1","certainty":"candidate","reason":"old target name remains after deletion, rename or move; lexical binding and migration status are unresolved"}));
         }
     }
     let mut edges = BTreeMap::new();
@@ -768,6 +903,11 @@ pub fn impact(service: &QueryService, args: &Value, deadline: Instant) -> Result
     if let Some(reason) = reason {
         result["output"] = json!({"truncated":true,"truncation_reason":reason,"remaining_relations":null,"continuation":{"kind":"requery","frontier":frontier,"suggested":{"depth":(args["depth"].as_u64().unwrap_or(3)+1).min(10)}}});
     }
+    crate::impact_report::enrich(&mut result, &base, &head, args, deadline)?;
+    if result["output"]["truncated"] == true {
+        result["output"]["continuation"]["kind"] = json!("requery");
+        result["output"]["continuation"]["suggested"] = query::fixed_requery(&result, args);
+    }
     Ok(result)
 }
 
@@ -837,8 +977,16 @@ fn relation_changes(
         let new = sides[1].get(&key).map(Vec::as_slice).unwrap_or(&[]);
         let same = old.len().min(new.len());
         unchanged += same;
-        removed.extend(old[same..].iter().map(|r| query::relation_value(r, base)));
-        added.extend(new[same..].iter().map(|r| query::relation_value(r, head)));
+        removed.extend(old[same..].iter().map(|relation| {
+            let mut value = query::relation_value(relation, base);
+            value["side"] = json!("base");
+            value
+        }));
+        added.extend(new[same..].iter().map(|relation| {
+            let mut value = query::relation_value(relation, head);
+            value["side"] = json!("head");
+            value
+        }));
     }
     Ok(
         json!({"basis":"complete","matching_basis":"multiset of kind and matched endpoint identities; locations may shift; evidence and binding gaps remain those of each side","added_count":added.len(),"removed_count":removed.len(),"unchanged_count":unchanged,"added":added,"removed":removed}),

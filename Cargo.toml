@@ -10,6 +10,9 @@ publish = false
 
 [workspace.dependencies]
 lz4_flex = "0.11"
+protox-parse = "=0.10.0"
+md5 = "=0.8.0"
+base64 = "=0.22.1"
 miniz_oxide = "0.8"
 anyhow = "1.0"
 blake3 = "1.8"

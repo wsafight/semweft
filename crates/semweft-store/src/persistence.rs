@@ -37,6 +37,8 @@ fn reuse_hash(manifest: &Manifest) -> String {
             files,
             &manifest.binary_files,
             manifest.analysis_versions.get("analysis_config"),
+            manifest.analysis_versions.get("syntax"),
+            manifest.analysis_versions.get("go_build_environment"),
         ))
         .unwrap(),
     )
@@ -1361,26 +1363,37 @@ pub fn private_dir(path: &Path) -> Result<()> {
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         bail!("index_store_error: private storage directory cannot be a symbolic link");
     }
-    fs::create_dir_all(path).context("index_store_error: creating private directory")?;
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(path)
+        .context("index_store_error: creating private directory")?;
+    let metadata = fs::symlink_metadata(path)?;
+    ensure!(
+        !metadata.file_type().is_symlink(),
+        "index_store_error: private storage directory cannot be a symbolic link"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if !existed {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-            if let Some(parent) = path
+        ensure!(
+            metadata.permissions().mode() & 0o077 == 0,
+            "index_store_error: choose a dedicated private storage directory (mode 0700): {}",
+            path.display()
+        );
+        if !existed
+            && let Some(parent) = path
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
-            {
-                fs::File::open(parent)?
-                    .sync_all()
-                    .context("index_store_error: syncing new directory")?;
-            }
-        } else {
-            ensure!(
-                fs::metadata(path)?.permissions().mode() & 0o077 == 0,
-                "index_store_error: choose a dedicated private storage directory (mode 0700): {}",
-                path.display()
-            );
+        {
+            fs::File::open(parent)?
+                .sync_all()
+                .context("index_store_error: syncing new directory")?;
         }
     }
     #[cfg(not(unix))]

@@ -80,7 +80,7 @@ fn file_signature(
         let name = entry.file_name().to_string_lossy();
         if !entry.file_type().is_some_and(|t| t.is_file())
             || !(name.ends_with(".rs")
-                || name.ends_with(".go")
+                || semweft_query::is_go_build_input(&name)
                 || crate::web::is_source(&name)
                 || matches!(
                     name.as_ref(),

@@ -22,6 +22,42 @@ pub struct Config {
     pub context: ContextConfig,
     #[serde(default)]
     pub daemon: Daemon,
+    #[serde(default)]
+    pub architecture: crate::architecture::Policy,
+    #[serde(default)]
+    pub guard: crate::guard::Policy,
+    #[serde(default)]
+    pub contracts: crate::contracts::Config,
+    #[serde(default)]
+    pub services: Vec<crate::services::Service>,
+    #[serde(default)]
+    pub go: GoBuild,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GoBuild {
+    pub tags: Option<Vec<String>>,
+}
+
+impl GoBuild {
+    pub fn validate(&self) -> Result<()> {
+        if let Some(tags) = &self.tags
+            && (tags.len() > 256
+                || tags.iter().any(|tag| {
+                    tag.is_empty()
+                        || tag.len() > 128
+                        || !tag.chars().all(|character| {
+                            character.is_ascii_alphanumeric() || matches!(character, '_' | '.')
+                        })
+                }))
+        {
+            bail!(
+                "invalid_argument: go.tags must contain at most 256 nonempty alphanumeric, underscore or dot tags (128 bytes each)"
+            );
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -228,6 +264,11 @@ pub fn resolve(workspace: Option<&Path>, config_path: Option<&Path>) -> Result<R
         bail!("invalid_argument: unsupported schema or zero idle timeout");
     }
     exclusions(&config.workspace.exclude)?;
+    config.architecture.validate()?;
+    config.guard.validate()?;
+    config.contracts.validate()?;
+    crate::services::validate(&config.services)?;
+    config.go.validate()?;
     let root = if let Some(path) = &config_path {
         path.parent()
             .unwrap()
@@ -364,7 +405,7 @@ pub fn members(root: &Path) -> Result<Vec<String>> {
 
 impl Resolved {
     pub fn analysis_hash(&self) -> String {
-        digest(serde_json::to_vec(&json!({"workspace":self.config.workspace,"dependency_depth":self.config.index.dependency_depth,"tokenizer":self.config.context.tokenizer})).unwrap())
+        digest(serde_json::to_vec(&json!({"workspace":self.config.workspace,"dependency_depth":self.config.index.dependency_depth,"tokenizer":self.config.context.tokenizer,"go":self.config.go})).unwrap())
     }
     fn trust_identity(&self) -> Result<String> {
         // Git identity is independent of HEAD; changing remotes invalidates trust.
@@ -463,6 +504,29 @@ mod tests {
         assert_eq!(config.index.dependency_depth, 0);
         assert_eq!(config.context.tokenizer, "estimated");
         assert_eq!(config.daemon.idle_timeout_ms, 60_000);
+        assert!(config.go.tags.is_none());
+    }
+
+    #[test]
+    fn go_tags_reject_flags_and_preserve_explicit_empty_selection() {
+        let selected: Config = toml::from_str("schema_version='0.1'\n[go]\ntags=[]\n").unwrap();
+        assert_eq!(selected.go.tags, Some(vec![]));
+        selected.go.validate().unwrap();
+        for tag in ["", "-mod=mod", "tag,other", "tag other", "a/b", "标签"] {
+            assert!(
+                GoBuild {
+                    tags: Some(vec![tag.into()])
+                }
+                .validate()
+                .is_err(),
+                "{tag}"
+            );
+        }
+        GoBuild {
+            tags: Some(vec!["go1.22".into(), "custom_tag".into()]),
+        }
+        .validate()
+        .unwrap();
     }
 
     #[test]

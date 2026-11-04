@@ -45,6 +45,10 @@
 
 **SCIP 的边界**：SCIP 提供 occurrence、符号信息及部分符号关系，不是完整的调用图。将语义引用与语法调用点对齐后，可生成有 L3 证据支持的调用边，但仍须按语言规则判断 certainty；宏、重载、动态分发和位置映射失败要分别诊断。对齐本身不构成准确率证明。L3 表示语义证据来源，不是对整体正确性或完整性的认证。
 
+Go 的 selector 调用在 SCIP 唯一绑定到捕获源码中的具体函数/接收者方法定义时，可使用 `scip_occurrence+go_static_dispatch+syntax_callsite` 形成 definite 静态调用；interface 方法定义为 trait_method，保持 candidate。多目标、间接函数值、失效或未激活绑定也不能提升。TypeScript 类方法可能被覆盖，当前继续作为声明绑定候选，不因目标唯一或 Go 的规则升级而成为 definite。适配规则版本进入分析输入，旧规则的缓存须重新验证。九个真实仓库源码样本、方法/接口对照与测量边界见[语言验收](language-acceptance.md)。
+
+匿名默认导出与匿名回调分别有自己的词法调用所有者；这支持归属其函数体内的调用，不证明外围调用一定执行回调。Go 构建环境与语法提取器版本参与历史语义复用身份，相同源码但不同标签/平台不能复用为同一个 current 语义结果。未由生产器激活的文件仍可提供语法候选。
+
 **Rust 实现关系（find_implementations）**：`kind="implements"` 表示已索引的显式 trait 实现。trait 模式由 impl 身份指向 trait，位置为 impl 头部 trait 名；trait_method 模式由显式实现方法指向 trait 方法，位置为实现方法名。同一实现关系可挂多条证据，`relations[].implementation` 保留 impl 头部、类型、泛型、位置和直接方法等语法事实。默认方法继承另放 `inherited_defaults`，不伪造显式方法关系；仅有可靠的 definite 竞争头部绑定且无目标绑定时，才将名称候选放 `excluded_candidates`。candidate 竞争或确定绑定冲突均保留为 candidate 并披露 gap，不据此排除或提升为 definite。
 
 |source / derivation|支持内容与确定性|
@@ -71,7 +75,9 @@
 
 **status 判定**：声明范围内的受支持分析全部完成，且 known_gaps 与 pending_units 均为空时为 within_scope；存在任一 known_gaps 或 pending_units 时为 partial；分析范围本身无法确定（如构建配置识别失败、首次索引未完成）时为 unknown。within_scope 不与非空 known_gaps 同时出现。
 
-影响图表示候选影响，不直接判断每个调用方是否必须修改。verify_change 尚未接入，本次 v0.2 增量仅增加实现查询；以下为后续规则核验的契约规划：核验明确声明的规则，返回 findings 和规则版本，每条规则单独返回三个状态之一：violations_found（发现违规）、no_violations_found（声明范围内未发现违规）、insufficient_evidence（证据不足）。整体结果取最严重者：任一规则 violations_found 则整体为 violations_found；否则任一 insufficient_evidence 则整体为 insufficient_evidence；全部规则为 no_violations_found 时整体才为 no_violations_found。未运行的规则和缺失证据必须列出；行为正确性仍需依靠需求、编译器、测试或人工证据。人的批准作为独立审查记录，不提升关系 certainty 或消除分析缺口。
+影响图表示候选影响，不直接判断每个调用方是否必须修改。`verify_change` 已接入四条版本为 `0.1` 的内置审查规则：配置变化、分析不完整、残留名称引用与候选影响关系，具体触发条件见[功能规格](features.md) D 节。返回 `verification` 和 `findings`，每条规则单独返回三个状态之一：violations_found（发现违规）、no_violations_found（声明范围内未发现违规）、insufficient_evidence（证据不足）。整体结果取最严重者：任一规则 violations_found 则整体为 violations_found；否则任一 insufficient_evidence 则整体为 insufficient_evidence；全部规则为 no_violations_found 时整体才为 no_violations_found。首版规则仅产生 warning / insufficient_evidence，不产生确定违规；当前索引仍披露 L1 绑定缺口，因此通常为证据不足。状态和逐规则计数基于分页前全量结果，不随当前页 findings 数量变化。未运行的规则和缺失证据必须列出；行为正确性仍需依靠需求、编译器、测试或人工证据。人的批准作为独立审查记录，不提升关系 certainty 或消除分析缺口。
+
+`suggest_tests` 只从显式 Rust 测试属性和已索引反向影响路径推导候选，保存每条 witness 的 side、目标和完整关系证据。test_only 作用域不等于测试入口。base 的名称匹配候选可映射到 head，原 witness 仍属于 base；仅旧版本入口单独标为 base_only。候选始终为 candidate、executed=false，路径绑定 definite 不能解释为运行覆盖或测试必须执行。无逐测试覆盖率和自定义/生成入口支持时，completeness 保持 partial，零候选不能证明无需测试。
 
 ### 2.3 承诺边界（所有文档适用）
 

@@ -136,7 +136,13 @@ pub fn repo_map(
                     .map(|n| (p.as_str(), n))
             })
             .collect::<BTreeMap<_, _>>();
-        let mode = args["dependencies"].as_str().unwrap_or("crate");
+        let mode = args["dependencies"]
+            .as_str()
+            .unwrap_or(if args["cycles"] == true {
+                "module"
+            } else {
+                "crate"
+            });
         let mut extra_gaps = vec![];
         for (path, manifest) in &manifests {
             query::check_deadline(deadline)?;
@@ -399,9 +405,15 @@ pub fn repo_map(
             args,
             &mut entries,
             &mut dependencies,
+            &mut extra_gaps,
             mode,
             deadline,
         )?;
+        if mode == "service" {
+            let (mapped, summary) = crate::services::dependencies(stored, args, deadline)?;
+            dependencies = mapped;
+            result["service_mapping"] = summary;
+        }
         let mut incoming = BTreeMap::<&str, BTreeSet<&str>>::new();
         for r in &relations {
             query::check_deadline(deadline)?;

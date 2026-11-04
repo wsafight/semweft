@@ -1,6 +1,7 @@
+use crate::sync::MutexExt;
 use crate::{
     engine::{Engine, StoredView},
-    git,
+    git, suggestions, verify,
 };
 use anyhow::{Context, Result, bail};
 use semweft_core::*;
@@ -67,6 +68,35 @@ fn finish_computation(result: &mut Value, args: &Value, computed: Result<()>) ->
     Ok(())
 }
 
+pub(crate) fn fixed_requery(result: &Value, args: &Value) -> Value {
+    let mut suggested = args.clone();
+    suggested.as_object_mut().unwrap().remove("cursor");
+    if result.get("snapshots").is_some() {
+        for side in ["base", "head"] {
+            suggested["diff"][side] = json!({"kind":"snapshot",
+                "snapshot_id":result["snapshots"][side]["snapshot_id"],
+                "semantic_epoch":result["snapshots"][side]["epochs"]["semantic"]});
+            if result["snapshots"][side]["commit"].is_string()
+                && result["snapshots"][side]["commit"]
+                    != result["snapshots"][side]["analysis_commit"]
+            {
+                suggested["diff"][side]["commit_context"] =
+                    result["snapshots"][side]["commit"].clone();
+            }
+        }
+    } else {
+        suggested["snapshot_id"] = result["snapshot_id"].clone();
+        suggested["semantic_epoch"] = result["epochs"]["semantic"].clone();
+    }
+    suggested["depth"] = json!((args["depth"].as_u64().unwrap_or(3) + 1).min(10));
+    suggested["max_nodes"] = json!((args["max_nodes"].as_u64().unwrap_or(1000) * 2).min(100000));
+    if result["output"]["truncation_reason"] == "timeout" {
+        suggested["timeout_ms"] =
+            json!((args["timeout_ms"].as_u64().unwrap_or(5000) * 2).min(60000));
+    }
+    suggested
+}
+
 fn mark_timeout(result: &mut Value, args: &Value) {
     result["evidence_summary"]["basis"] = json!("partial");
     result["evidence_summary"]["exact"] = json!(false);
@@ -93,20 +123,38 @@ pub use semweft_protocol::{MIN_BUDGET, error_value, failure, tool_schema, tools,
 
 pub fn capabilities() -> Value {
     json!({"schema_version":"0.1","capabilities_version":"0.1-p0","stage":"mvp_experimental","tools":tools(),
-        "languages":{"rust":{"L1":{"status":"experimental","indexer":semweft_lang_rust::PARSER_VERSION,"binding":"name candidates; lexical scope unresolved"},"L2":{"status":"unsupported"},"batch_L3_scip":{"status":"experimental","format":"binary SCIP 0.10","source_manifest_required":true,"requires_build":false,"requires_trust":false,"producer":"external index with tool name and version; producer execution is outside import"},"resident_L3":{"status":"experimental","backend":"external rust-analyzer LSP","queries":["definition","implementation","references","diagnostic"],"requires_build":true,"requires_trust":true,"tool":"rust-analyzer","tool_available":tool_available(),"authorization":"semweft trust --accept-build-execution"}},"go":go_capabilities(),"typescript_javascript":{"status":if cfg!(feature="web-experimental") {"experimental"} else {"unsupported"},"enable":"--features web-experimental","L1":{"binding":"syntax name candidates","extensions":["ts","tsx","js","jsx","mjs","cjs","mts","cts"]},"batch_L3_scip":{"source_manifest_required":true},"resident_L3":{"status":"unsupported"},"dependency_depth":0}},
-        "rules":[],"tokenizers":[{"id":"estimated","mode":"estimated","method":"one token per UTF-8 byte of compact serialized JSON, including metadata; conservative estimate","min_budget":MIN_BUDGET},
+        "languages":{"rust":{"L1":{"status":"experimental","indexer":semweft_lang_rust::PARSER_VERSION,"binding":"name candidates; lexical scope unresolved"},"L2":{"status":"unsupported"},"batch_L3_scip":{"status":"experimental","format":"binary SCIP 0.10","source_manifest_required":true,"requires_build":false,"requires_trust":false,"producer":"external index with tool name and version; producer execution is outside import"},"resident_L3":{"status":"experimental","backend":"external rust-analyzer LSP","queries":["definition","implementation","references","diagnostic"],"requires_build":true,"requires_trust":true,"tool":"rust-analyzer","tool_available":tool_available(),"authorization":"semweft trust --accept-build-execution"}},"go":go_capabilities(),"typescript_javascript":web_capabilities()},
+        "rules":verify::rules(),"tokenizers":[{"id":"estimated","mode":"estimated","method":"one token per UTF-8 byte of compact serialized JSON, including metadata; conservative estimate","min_budget":MIN_BUDGET},
             {"id":crate::tokens::CL100K,"mode":"exact","method":"offline BPE over complete compact JSON","min_budget":MIN_BUDGET},
             {"id":crate::tokens::O200K,"mode":"exact","method":"offline BPE over complete compact JSON","min_budget":MIN_BUDGET}],
         "limits":{"timeout_ms":5000,"max_timeout_ms":60000,"fresh_wait_ms":2000,"max_fresh_wait_fraction":0.5,"limit":100,"max_limit":1000,"depth":3,"max_depth":10,"max_nodes":100000,"dependency_depth":"nonnegative u32; offline Cargo resolution requires repository trust","snapshot_retention":"unlimited by default; configurable retention with durable pins and safe GC","max_cursors":256,"default_max_cursor_bytes":67108864,"cursor_limits_configurable":true},
-        "unsupported":["verify_change","GUI","IDL","HTTP MCP"],"commands":["benchmark-storage","snapshots pin","snapshots unpin","snapshots gc","snapshots usage","snapshots compact","init","trust","index","doctor","capabilities","status","map","search","symbol-at","symbol","refs","impls","calls","impact","context","mcp","prototype scan","prototype check"]})
+        "path_queries":{"status":"experimental","endpoints":["indexed_symbol","source_file","configured_service"],"relations":["call"],"cycle_policy":"simple paths","max_depth":10,"max_paths":1000,"module_service_mapping":"explicit captured ownership; aggregate paths are not executable call chains"},
+        "test_suggestions":{"status":"experimental","inputs":["symbol","diff"],"method":"reverse indexed call/reference paths","entrypoints":["Rust #[test]","Rust #[tokio::test]","Rust #[async_std::test]"],"coverage":"unavailable","executes_tests":false,"base_only_candidates":true},
+        "risk_scoring":{"status":"experimental","inputs":["diff","optional base/head risk_inputs artifacts"],"model":crate::risk_inputs::MODEL,"calibrated":false,"coverage":"source-bound LCOV observations; no test execution or per-test attribution","historical_hotspots":"explicit frozen Git non-merge commit windows"},
+        "public_api":{"method":"search_symbols api_scope=external","external_reachability":"candidate","reexports_expanded":true,"languages":["rust"],"semantic_validation":false},
+        "cycle_detection":{"scope":["crate","source_file","configured_service"],"algorithm":"strongly connected components","service_mapping":true},
+        "architecture":{"rule":"architecture_layer_direction","version":crate::architecture::RULE_VERSION,"scope":"indexed file-level dependencies","baseline":true},
+        "agent_guards":{"tools":["agent_preflight","agent_verify"],"protection":"captured base/head policies; whole-file conservative symbol scope","compiler_and_tests_executed":false},
+        "hooks":{"hosts":["claude","codex"],"events":["PreToolUse","PostToolUse"],"tool_input_scope":"explicit file edits and apply_patch headers; not shell writes","host_end_to_end_validated":false},
+        "reviews":{"storage":"local immutable content-bound records","approval_invalidated_by":["snapshot","semantic_epoch","rule_versions"],"signed":false},
+        "contracts":{"status":"experimental","formats":["protobuf"],"parser":"protox-parse@0.10.0","mapping":"explicit configuration; candidate only","rules":crate::contracts::rules(),"unmodeled":["thrift","openapi","enum compatibility","descriptor linking","runtime consumers"]},
+        "ci_reports":{"formats":["json","markdown","sarif_2.1.0","html"],"sarif_scope":"verification findings","all_pages_commands":["verify","tests","impact","arch-check","guard","contract-impact","map","search","calls","path","refs","impls"],"offline_render":"report --input","executes_tests":false},
+        "unsupported":["HTTP MCP","Thrift","OpenAPI"],"commands":["benchmark-storage","snapshots pin","snapshots unpin","snapshots gc","snapshots usage","snapshots compact","init","trust","index","doctor","capabilities","status","map","search","symbol-at","symbol","refs","impls","calls","impact","verify","path","tests","risk-inputs","arch-check","guard before","guard after","hook","review save","review get","contract-impact","report","context","mcp","prototype scan","prototype check"]})
 }
 
 fn go_capabilities() -> Value {
     if cfg!(feature = "go-experimental") {
-        json!({"status":"experimental","L1":{"status":"experimental","binding":"syntax name candidates"},"batch_L3_scip":{"status":"experimental","source_manifest_required":true},"resident_L3":{"status":"experimental","backend":"scip-go","refresh":"full project","requires_trust":true},"build_systems":["go.mod","go.work"],"dependency_depth":0})
+        json!({"status":"experimental","formal_acceptance":"local source-reviewed samples and latency measurements available; independent review, broader build coverage and remote CI pending","L1":{"status":"experimental","binding":"syntax name candidates"},"batch_L3_scip":{"status":"experimental","source_manifest_required":true},"resident_L3":{"status":"experimental","backend":"scip-go","refresh":"full project","requires_trust":true},"build_systems":["go.mod","go.work"],"build_tags":{"config":"go.tags","environment":"frozen in snapshot; configured tags replace GOFLAGS"},"dependency_depth":0})
     } else {
         json!({"status":"unsupported","enable":"cargo install --features go-experimental"})
     }
+}
+
+fn web_capabilities() -> Value {
+    json!({"status":if cfg!(feature="web-experimental") {"experimental"} else {"unsupported"},
+        "formal_acceptance":"local TS and JS source-reviewed samples and latency measurements available; independent review, broader build coverage and remote CI pending",
+        "enable":"--features web-experimental","L1":{"binding":"syntax candidates only","module_resolution":["relative imports","local JSONC tsconfig inheritance","paths/baseUrl candidates","literal import()/require()"],"extensions":["ts","tsx","js","jsx","mjs","cjs","mts","cts"]},
+        "batch_L3_scip":{"source_manifest_required":true},"resident_L3":{"status":if cfg!(feature="web-experimental"){"experimental"}else{"unsupported"},"backend":"scip-typescript","refresh":"full project rebuild","requires_trust":true},"dependency_depth":0})
 }
 
 fn tool_available() -> bool {
@@ -260,7 +308,7 @@ impl QueryService {
         }
     }
     pub fn cancel(&self, id: &str) {
-        let mut cancellations = self.cancellations.lock().unwrap();
+        let mut cancellations = self.cancellations.locked();
         if cancellations.len() > 256 {
             cancellations.retain(|_, flag| Arc::strong_count(flag) > 1);
         }
@@ -290,7 +338,7 @@ impl QueryService {
         let _guard = CancelGuard;
         let result = self.execute(tool, args, deadline);
         if let Some(id) = id {
-            self.cancellations.lock().unwrap().remove(id);
+            self.cancellations.locked().remove(id);
         }
         result
     }
@@ -306,7 +354,7 @@ impl QueryService {
         if tool == "index_status" {
             let mut result = self.engine.status(&args)?;
             let (count, bytes) = self.page_limits();
-            let mut pages = self.pages.lock().unwrap();
+            let mut pages = self.pages.locked();
             pages.trim(count, bytes);
             result["storage"]["cursor_cache"] = json!({"cursors":pages.items.len(),"estimated_bytes":pages.bytes(),"max_count":count,"max_bytes":bytes,"evictions":pages.evictions});
             return Ok(result);
@@ -314,8 +362,22 @@ impl QueryService {
         if let Some(cursor) = args["cursor"].as_str() {
             return self.continue_page(tool, &args, cursor);
         }
-        let mut result = if tool == "impact_of" && args.get("diff").is_some() {
-            git::impact(self, &args, deadline)?
+        let mut result = if matches!(
+            tool,
+            "impact_of"
+                | "verify_change"
+                | "suggest_tests"
+                | "arch_check"
+                | "agent_verify"
+                | "contract_impact"
+        ) && args.get("diff").is_some()
+        {
+            let impact = git::impact(self, &args, deadline)?;
+            if tool == "verify_change" {
+                verify::report(impact, &args)
+            } else {
+                impact
+            }
         } else {
             if args.get("snapshot_id").is_none() {
                 self.engine.scan(false)?;
@@ -336,8 +398,43 @@ impl QueryService {
             if Instant::now() >= deadline {
                 bail!("timeout: no query results within timeout_ms");
             }
-            self.compute(tool, &args, &stored, fresh, deadline)?
+            let compute_tool = if tool == "suggest_tests" {
+                "impact_of"
+            } else {
+                tool
+            };
+            self.compute(compute_tool, &args, &stored, fresh, deadline)?
         };
+        if tool == "suggest_tests" {
+            result = suggestions::report(self, result, &args, deadline)?;
+        }
+        if tool == "agent_verify" {
+            result = crate::guard::after(self, result, &args, deadline)?;
+        }
+        if tool == "contract_impact" {
+            result = crate::contracts::report(self, result, &args, deadline)?;
+        }
+        if tool == "arch_check" {
+            let head_metadata = if result.get("snapshots").is_some() {
+                &result["snapshots"]["head"]
+            } else {
+                &result
+            };
+            let head = self.engine.historical(
+                head_metadata["snapshot_id"].as_str().unwrap(),
+                head_metadata["epochs"]["semantic"].as_u64(),
+            )?;
+            let base = result["snapshots"]["base"]["snapshot_id"]
+                .as_str()
+                .map(|snapshot| {
+                    self.engine.historical(
+                        snapshot,
+                        result["snapshots"]["base"]["epochs"]["semantic"].as_u64(),
+                    )
+                })
+                .transpose()?;
+            crate::architecture::report(&mut result, &head, base.as_ref(), &args, deadline)?;
+        }
         check_cancelled()?;
         if tool == "context_pack" {
             let omitted = result
@@ -364,9 +461,34 @@ impl QueryService {
             count_context(&mut result)?;
             return Ok(result);
         }
-        let fields = match tool {
+        let mut fields = match tool {
+            "contract_impact" => vec![
+                "findings",
+                "contract_changes",
+                "contract_impacts",
+                "relations",
+                "relation_changes.added",
+                "relation_changes.removed",
+                "affected_modules",
+            ],
+            "agent_preflight" => vec!["findings", "symbols", "relations"],
+            "agent_verify" => vec![
+                "findings",
+                "relations",
+                "relation_changes.added",
+                "relation_changes.removed",
+                "affected_modules",
+            ],
+            "arch_check" if result.get("snapshots").is_some() => vec![
+                "findings",
+                "relations",
+                "relation_changes.added",
+                "relation_changes.removed",
+                "affected_modules",
+            ],
+            "arch_check" => vec!["findings"],
             "search_symbols" | "symbol_at" => vec!["symbols"],
-            "repo_map" => vec!["modules", "dependencies", "entries"],
+            "repo_map" => vec!["modules", "dependencies", "entries", "cycles"],
             "find_references" => {
                 if result.get("history").is_some() {
                     vec!["relations", "history.relations"]
@@ -374,14 +496,37 @@ impl QueryService {
                     vec!["relations"]
                 }
             }
+            "verify_change" => vec![
+                "findings",
+                "relations",
+                "relation_changes.added",
+                "relation_changes.removed",
+                "affected_modules",
+            ],
+            "suggest_tests" if result.get("relation_changes").is_some() => vec![
+                "test_candidates",
+                "relations",
+                "relation_changes.added",
+                "relation_changes.removed",
+                "affected_modules",
+            ],
+            "suggest_tests" => vec!["test_candidates", "relations"],
             "impact_of" if result.get("relation_changes").is_some() => vec![
                 "relations",
                 "relation_changes.added",
                 "relation_changes.removed",
+                "affected_modules",
             ],
+            "find_paths" => vec!["paths"],
             "call_graph" | "impact_of" | "find_implementations" => vec!["relations"],
             _ => vec![],
         };
+        if result.get("api_changes").is_some() {
+            fields.push("api_changes");
+        }
+        if result.get("affected_services").is_some() {
+            fields.push("affected_services");
+        }
         if matches!(tool, "search_symbols" | "repo_map") && Instant::now() >= deadline {
             mark_timeout(&mut result, &args);
         }
@@ -398,7 +543,7 @@ impl QueryService {
         Ok(response)
     }
     fn page_limits(&self) -> (usize, usize) {
-        let state = self.engine.state.lock().unwrap();
+        let state = self.engine.state.locked();
         (
             state.resolved.config.index.cursor_cache_count,
             state.resolved.config.index.cursor_cache_bytes,
@@ -407,7 +552,7 @@ impl QueryService {
     fn continue_page(&self, tool: &str, args: &Value, cursor: &str) -> Result<Value> {
         let (max_count, max_bytes) = self.page_limits();
         let page = {
-            let mut pages = self.pages.lock().unwrap();
+            let mut pages = self.pages.locked();
             pages.trim(max_count, max_bytes);
             pages.items.get(cursor).cloned()
         }
@@ -473,6 +618,8 @@ impl QueryService {
             }
             relation_position += length;
         }
+        let remaining_path_relations =
+            (page.tool == "find_paths").then(|| path_relation_count(&page.lists["paths"][end..]));
         if total > end {
             page.offset = end;
             let cursor = self.save_page(page)?;
@@ -503,6 +650,24 @@ impl QueryService {
             } else {
                 json!(total.saturating_sub(end))
             };
+        if let Some(remaining) = remaining_path_relations {
+            let paths = list_at(&response, "paths");
+            let returned = paths.len();
+            let relations = path_relation_count(paths);
+            response["output"]["returned_paths"] = json!(returned);
+            response["output"]["returned_relations"] = json!(relations);
+            let complete = response["path_summary"]["enumeration_complete"] == true;
+            response["output"]["remaining_paths"] = if complete {
+                json!(total.saturating_sub(end))
+            } else {
+                Value::Null
+            };
+            response["output"]["remaining_relations"] = if complete {
+                json!(remaining)
+            } else {
+                Value::Null
+            };
+        }
         if response.get("history").is_some() {
             response["history"]["output"] = json!({"truncated":total>end,"returned_relations":list_at(&response,"history.relations").len(),"continuation":response["output"]["continuation"]});
         }
@@ -514,7 +679,7 @@ impl QueryService {
 
     fn save_page(&self, page: Page) -> Result<String> {
         let (max_count, max_bytes) = self.page_limits();
-        let mut next = self.next.lock().unwrap();
+        let mut next = self.next.locked();
         *next += 1;
         let cursor = identity(
             "cur",
@@ -541,32 +706,71 @@ impl QueryService {
     ) -> Result<Value> {
         let mut result = envelope(stored, fresh);
         match tool {
+            "get_review_result" => {
+                let resolved = self.engine.state.locked().resolved.clone();
+                result["review"] =
+                    crate::reviews::get(&resolved, stored, args["review_id"].as_str().unwrap())?;
+            }
+            "agent_preflight" => {
+                return crate::guard::before(
+                    stored,
+                    result["fresh_requirement"].clone(),
+                    args,
+                    deadline,
+                );
+            }
+            "arch_check" => {}
             "search_symbols" => {
                 let query = args["query"].as_str().unwrap();
                 let mode = args["match"].as_str().unwrap_or("fuzzy");
+                let api = (args["api_scope"] == "external")
+                    .then(|| stored.api_surface(deadline))
+                    .transpose()?;
                 let mut matches = BTreeMap::new();
                 let computed = (|| -> Result<()> {
                     for s in &stored.view.snapshot.syntax.symbols {
                         check_deadline(deadline)?;
+                        let exports = api.as_ref().and_then(|api| api.by_symbol.get(&s.symbol_id));
+                        let alias_match = exports.is_some_and(|exports| {
+                            exports.iter().any(|export| {
+                                let path = export["path"].as_str().unwrap();
+                                match mode {
+                                    "exact" => {
+                                        path == query || path.rsplit("::").next() == Some(query)
+                                    }
+                                    "prefix" => path.starts_with(query),
+                                    _ => fuzzy(path, query),
+                                }
+                            })
+                        });
                         if prefix(&s.file, args)
                             && kind_matches(s, args["kind"].as_str())
-                            && match mode {
-                                "exact" => {
-                                    s.name == query
-                                        || qualified_name(s, stored) == query
-                                        || public_name(s) == query
-                                        || s.qualified_name == query
-                                }
-                                "prefix" => {
-                                    s.name.starts_with(query)
-                                        || qualified_name(s, stored).starts_with(query)
-                                        || public_name(s).starts_with(query)
-                                }
-                                _ => fuzzy(
-                                    &format!("{} {}", qualified_name(s, stored), s.file),
-                                    query,
-                                ),
-                            }
+                            && (api.is_none() || exports.is_some())
+                            && (api.is_some()
+                                || args["visibility"].as_str().is_none_or(|visibility| {
+                                    visibility == "all"
+                                        || symbol_value(s, stored, false, false)["visibility"]
+                                            == visibility
+                                }))
+                            && (query == "*"
+                                || alias_match
+                                || match mode {
+                                    "exact" => {
+                                        s.name == query
+                                            || qualified_name(s, stored) == query
+                                            || public_name(s) == query
+                                            || s.qualified_name == query
+                                    }
+                                    "prefix" => {
+                                        s.name.starts_with(query)
+                                            || qualified_name(s, stored).starts_with(query)
+                                            || public_name(s).starts_with(query)
+                                    }
+                                    _ => fuzzy(
+                                        &format!("{} {}", qualified_name(s, stored), s.file),
+                                        query,
+                                    ),
+                                })
                         {
                             let key = (
                                 s.name != query,
@@ -575,7 +779,10 @@ impl QueryService {
                                 s.name_span,
                                 &s.symbol_id,
                             );
-                            let value = symbol_value(s, stored, false, true);
+                            let mut value = symbol_value(s, stored, false, true);
+                            if let Some(api) = &api {
+                                value["api_exposure"] = api.exposure(s);
+                            }
                             matches.insert(key, value);
                             check_deadline(deadline)?;
                         }
@@ -583,6 +790,15 @@ impl QueryService {
                     Ok(())
                 })();
                 result["symbols"] = Value::Array(matches.into_values().collect());
+                if let Some(api) = api {
+                    result["api_summary"] =
+                        api.summary(result["symbols"].as_array().unwrap().len());
+                } else if args["visibility"] == "public" {
+                    result["api_summary"] = json!({"declaration_count":result["symbols"].as_array().unwrap().len(),
+                        "basis":"syntax_public_visibility","external_reachability":"not_established",
+                        "includes_test_declarations":true,"reexports_expanded":false,
+                        "limitations":["Private enclosing modules and types may hide public declarations", "Conditional compilation and generated declarations are not expanded", "Reexports and external consumers are not exhaustive"]});
+                }
                 finish_computation(&mut result, args, computed)?;
             }
             "get_symbol" => {
@@ -601,6 +817,10 @@ impl QueryService {
             "repo_map" => {
                 let computed = crate::structure::repo_map(&mut result, stored, args, deadline);
                 finish_computation(&mut result, args, computed)?;
+                if args["cycles"] == true {
+                    let computed = crate::cycles::report(&mut result, deadline);
+                    finish_computation(&mut result, args, computed)?;
+                }
             }
             "find_references" => {
                 let target = resolve(stored, args["symbol"].as_str().unwrap())?;
@@ -750,6 +970,7 @@ impl QueryService {
                     result["changes"] = json!([]);
                 }
             }
+            "find_paths" => return find_paths(result, stored, args, deadline),
             "context_pack" => return context_pack(result, stored, args, deadline),
             _ => bail!("capability_unsupported: {tool}"),
         }
@@ -760,6 +981,14 @@ impl QueryService {
 fn list_at<'a>(value: &'a Value, path: &str) -> &'a [Value] {
     let v = path.split('.').fold(value, |v, k| &v[k]);
     v.as_array().map(Vec::as_slice).unwrap_or(&[])
+}
+fn path_relation_count(paths: &[Value]) -> usize {
+    paths
+        .iter()
+        .flat_map(|path| list_at(path, "relations"))
+        .filter_map(|relation| relation["relation_id"].as_str())
+        .collect::<BTreeSet<_>>()
+        .len()
 }
 fn set_list(value: &mut Value, path: &str, items: Vec<Value>) {
     if let Some((a, b)) = path.split_once('.') {
@@ -840,7 +1069,7 @@ pub fn resolve<'a>(stored: &'a StoredView, name: &str) -> Result<&'a Symbol> {
         )),
     }
 }
-fn qualified_name(symbol: &Symbol, stored: &StoredView) -> String {
+pub(crate) fn qualified_name(symbol: &Symbol, stored: &StoredView) -> String {
     let namespace = stored
         .namespaces
         .iter()
@@ -1116,10 +1345,7 @@ pub struct Graph {
     pub basis: &'static str,
     pub reason: Option<&'static str>,
 }
-pub fn truncation_reason(
-    previous: Option<&'static str>,
-    next: Option<&'static str>,
-) -> Option<&'static str> {
+pub fn truncation_reason<'a>(previous: Option<&'a str>, next: Option<&'a str>) -> Option<&'a str> {
     let priority = |reason| match reason {
         Some("cancelled") => 5,
         Some("timeout") => 4,
@@ -1227,6 +1453,108 @@ pub fn traverse(
         basis,
         reason,
     }
+}
+
+fn find_paths(
+    mut result: Value,
+    stored: &StoredView,
+    args: &Value,
+    deadline: Instant,
+) -> Result<Value> {
+    if args["scope"]
+        .as_str()
+        .is_some_and(|scope| scope != "symbol")
+    {
+        return crate::services::find_paths(result, stored, args, deadline);
+    }
+    use semweft_algo::{
+        graph::Interrupt,
+        paths::{Limits, StopReason, simple_paths_filtered},
+    };
+    let from = resolve(stored, args["from"].as_str().unwrap())?;
+    let to = resolve(stored, args["to"].as_str().unwrap())?;
+    let index = stored.index();
+    let limits = Limits {
+        max_depth: args["max_depth"].as_u64().unwrap_or(5),
+        max_paths: args["max_paths"].as_u64().unwrap_or(100) as usize,
+        max_nodes: args["max_nodes"].as_u64().unwrap_or(1000) as usize,
+    };
+    let traversal = simple_paths_filtered(
+        &RelationGraph {
+            index,
+            direction: Direction::Outgoing,
+        },
+        from.symbol_id.as_str(),
+        to.symbol_id.as_str(),
+        limits,
+        || {
+            if check_cancelled().is_err() {
+                Err(Interrupt::Cancelled)
+            } else if Instant::now() >= deadline {
+                Err(Interrupt::Timeout)
+            } else {
+                Ok(())
+            }
+        },
+        |id| {
+            let relation = index.relation(id).unwrap();
+            relation.kind == "call" && filter_relation(relation.clone(), args).is_some()
+        },
+    );
+    if traversal.reason == Some(StopReason::Cancelled) {
+        bail!("cancelled: client cancelled path enumeration");
+    }
+    if traversal.reason == Some(StopReason::Timeout) && traversal.paths.is_empty() {
+        bail!("timeout: no paths computed within timeout_ms");
+    }
+    let reason = traversal.reason.map(|reason| match reason {
+        StopReason::PathLimit => "path_limit",
+        StopReason::DepthLimit => "depth_limit",
+        StopReason::NodeLimit => "node_limit",
+        StopReason::Timeout => "timeout",
+        StopReason::Cancelled => "cancelled",
+    });
+    let basis = match traversal.reason {
+        Some(StopReason::DepthLimit | StopReason::PathLimit) => "within_limits",
+        Some(_) => "partial",
+        None => "complete",
+    };
+    let mut relations = BTreeMap::new();
+    let paths = traversal.paths.iter().map(|path| {
+        let edges = path.edges.iter().map(|id| filter_relation(index.relation(id).unwrap().clone(), args).unwrap()).collect::<Vec<_>>();
+        for edge in &edges {
+            relations.insert(edge.relation_id.clone(), edge.clone());
+        }
+        json!({"path_id":identity("path", &[&stored.view.snapshot.snapshot_id,
+                &stored.view.epochs.semantic_epoch.to_string(), &from.symbol_id, &to.symbol_id, &path.edges.join("\n")]),
+            "symbol_ids":path.nodes,"length":edges.len(),
+            "symbols":path.nodes.iter().filter_map(|id| index.symbol(id)).map(|symbol| symbol_value(symbol,stored,false,false)).collect::<Vec<_>>(),
+            "certainty":if edges.iter().all(|edge| edge.certainty == Certainty::Definite) { "definite" } else { "candidate" },
+            "freshness":if edges.iter().any(|edge| edge.freshness == "pending") { "pending" } else { "current" },
+            "relations":edges.iter().map(|edge| relation_value(edge,stored)).collect::<Vec<_>>()})
+    }).collect::<Vec<_>>();
+    result["from"] = symbol_value(from, stored, false, false);
+    result["to"] = symbol_value(to, stored, false, false);
+    result["evidence_summary"] = summary(&relations.into_values().collect::<Vec<_>>(), basis);
+    result["path_summary"] = json!({"path_count":paths.len(),"enumeration_complete":reason.is_none(),
+        "reason":reason,"visited_nodes":traversal.visited.len(),"max_depth":limits.max_depth,
+        "max_paths":limits.max_paths,"max_nodes":limits.max_nodes,"cycle_policy":"simple paths; repeated symbols excluded",
+        "scope":"indexed symbol-to-symbol call paths; module and service mapping unsupported"});
+    result["paths"] = json!(paths);
+    result["frontier"] = json!(traversal.frontier);
+    if let Some(reason) = reason {
+        let mut suggested = args.clone();
+        suggested["snapshot_id"] = result["snapshot_id"].clone();
+        suggested["semantic_epoch"] = result["epochs"]["semantic"].clone();
+        suggested["max_depth"] = json!((limits.max_depth + 1).min(10));
+        suggested["max_paths"] = json!((limits.max_paths * 2).min(1000));
+        suggested["max_nodes"] = json!((limits.max_nodes * 2).min(100000));
+        suggested["timeout_ms"] =
+            json!((args["timeout_ms"].as_u64().unwrap_or(5000) * 2).min(60000));
+        result["output"] = json!({"truncated":true,"truncation_reason":reason,"remaining_relations":null,
+            "continuation":{"kind":"requery","frontier":traversal.frontier,"suggested":suggested}});
+    }
+    Ok(result)
 }
 
 fn context_pack(
@@ -1484,6 +1812,22 @@ fn count_context(result: &mut Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_requery_preserves_selected_commit_context_with_reused_semantic_views() {
+        let selected = "a".repeat(40);
+        let analysis = "b".repeat(40);
+        let result = json!({"snapshots":{"base":{"snapshot_id":"base","epochs":{"semantic":3},"commit":selected,"analysis_commit":analysis},"head":{"snapshot_id":"head","epochs":{"semantic":4},"commit":analysis,"analysis_commit":analysis}}});
+        let suggested = fixed_requery(
+            &result,
+            &json!({"diff":{"base":{"kind":"revision","revision":selected},"head":{"kind":"workspace"}}}),
+        );
+        assert_eq!(suggested["diff"]["base"]["kind"], "snapshot");
+        assert_eq!(suggested["diff"]["base"]["semantic_epoch"], 3);
+        assert_eq!(suggested["diff"]["base"]["commit_context"], selected);
+        assert!(suggested["diff"]["head"].get("commit_context").is_none());
+        semweft_protocol::validate("impact_of", &suggested).unwrap();
+    }
     use semweft_lang_rust::RustParser;
     use std::time::Duration;
 
@@ -1996,7 +2340,7 @@ mod tests {
         assert!(calls["properties"]["source"]["items"]["enum"].is_array());
         let impact = tool_schema("impact_of");
         assert!(impact["properties"]["diff"]["required"].is_array());
-        assert_eq!(tools().len(), 11);
+        assert_eq!(tools().len(), 19);
         let implementations = tool_schema("find_implementations");
         assert_eq!(implementations["anyOf"][1]["required"], json!(["symbol"]));
         let advertised = capabilities();
@@ -2008,7 +2352,24 @@ mod tests {
                 .contains(&json!("impls"))
         );
         assert!(
-            advertised["unsupported"]
+            advertised["commands"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("verify"))
+        );
+        assert!(
+            advertised["commands"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("report"))
+        );
+        assert_eq!(
+            advertised["ci_reports"]["sarif_scope"],
+            "verification findings"
+        );
+        assert_eq!(advertised["rules"].as_array().unwrap().len(), 4);
+        assert!(
+            !advertised["unsupported"]
                 .as_array()
                 .unwrap()
                 .contains(&json!("verify_change"))

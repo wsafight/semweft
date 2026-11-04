@@ -14,6 +14,135 @@ fn private_tempdir() -> tempfile::TempDir {
     temp
 }
 
+#[cfg(unix)]
+#[test]
+fn private_directory_creation_is_safe_for_concurrent_callers() {
+    use std::sync::Barrier;
+    let temp = private_tempdir();
+    let barrier = Barrier::new(16);
+    std::thread::scope(|scope| {
+        let workers = (0..16)
+            .map(|_| {
+                let barrier = &barrier;
+                let root = temp.path();
+                scope.spawn(move || {
+                    let mut failures = Vec::new();
+                    for iteration in 0..64 {
+                        barrier.wait();
+                        let directory = root.join(format!("round-{iteration}"));
+                        if let Err(error) = private_dir(&directory) {
+                            failures.push(error.to_string());
+                        }
+                        barrier.wait();
+                    }
+                    failures
+                })
+            })
+            .collect::<Vec<_>>();
+        let failures = workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert!(failures.is_empty(), "{failures:?}");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn private_directory_creates_private_ancestors() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = private_tempdir();
+    let directory = temp.path().join("cache/workspace/objects");
+    private_dir(&directory).unwrap();
+    for path in directory.ancestors().take(3) {
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    private_dir(&directory).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn private_directory_rejects_existing_public_directories_without_chmod() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = private_tempdir();
+    for mode in [0o755, 0o750, 0o707, 0o770, 0o777] {
+        let directory = temp.path().join(format!("mode-{mode:o}"));
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(mode)).unwrap();
+        let error = private_dir(&directory).unwrap_err();
+        assert!(error.to_string().contains("dedicated private storage"));
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            mode
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn private_directory_rejects_live_and_dangling_symlinks() {
+    use std::os::unix::fs::symlink;
+    let temp = private_tempdir();
+    let target = temp.path().join("target");
+    private_dir(&target).unwrap();
+    for (name, destination) in [("live", target), ("dangling", temp.path().join("missing"))] {
+        let link = temp.path().join(name);
+        symlink(&destination, &link).unwrap();
+        assert!(
+            private_dir(&link)
+                .unwrap_err()
+                .to_string()
+                .contains("symbolic link")
+        );
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+    assert!(!temp.path().join("missing").exists());
+}
+
+#[test]
+fn private_directory_rejects_existing_files() {
+    let temp = private_tempdir();
+    let path = temp.path().join("file");
+    fs::write(&path, b"preserved").unwrap();
+    assert!(private_dir(&path).is_err());
+    assert_eq!(fs::read(path).unwrap(), b"preserved");
+}
+
+#[test]
+fn atomic_writes_share_a_new_private_directory() {
+    let temp = private_tempdir();
+    let directory = temp.path().join("shared");
+    let barrier = std::sync::Barrier::new(16);
+    std::thread::scope(|scope| {
+        let workers = (0..16)
+            .map(|worker| {
+                let directory = &directory;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    let path = directory.join(format!("{worker}.json"));
+                    atomic_write(&path, format!("{{\"worker\":{worker}}}").as_bytes())?;
+                    Ok::<_, anyhow::Error>(fs::read(path)?)
+                })
+            })
+            .collect::<Vec<_>>();
+        for (worker, result) in workers.into_iter().enumerate() {
+            assert_eq!(
+                result.join().unwrap().unwrap(),
+                format!("{{\"worker\":{worker}}}").as_bytes()
+            );
+        }
+    });
+}
+
 fn publication(epoch: u64, text: &str) -> Publication {
     let common = SourceFile::new("// unchanged source\n".repeat(2048));
     let manifest = Manifest {
@@ -116,6 +245,42 @@ fn new_store_does_not_create_files_until_publication() {
     let (_, restored) = SnapshotStore::open(&root, WORKSPACE).unwrap();
     assert!(restored.is_none());
     assert!(!root.exists());
+}
+
+#[test]
+fn semantic_reuse_requires_the_same_parser_and_go_build_environment_after_restart() {
+    let temp = private_tempdir();
+    let (mut store, _) = SnapshotStore::open(temp.path(), WORKSPACE).unwrap();
+    let mut item = publication(1, "fn entry() {}\n");
+    let view = Arc::make_mut(&mut item.view);
+    let snapshot = Arc::make_mut(&mut view.snapshot);
+    snapshot.manifest.analysis_versions.extend(BTreeMap::from([
+        ("syntax".into(), "parser@1".into()),
+        (
+            "go_build_environment".into(),
+            "{\"GOFLAGS\":\"-tags=one\"}".into(),
+        ),
+    ]));
+    snapshot.input_hash = snapshot.manifest.input_hash();
+    view.epochs.semantic_epoch = view.epochs.syntax_epoch;
+    view.pending_units.clear();
+    save(&mut store, &item);
+    drop(store);
+    let (store, _) = SnapshotStore::open(temp.path(), WORKSPACE).unwrap();
+    let manifest = &item.view.snapshot.manifest;
+    assert_eq!(store.reusable(manifest), Some(key(&item.view)));
+    for (name, changed) in [
+        ("syntax", "parser@2"),
+        ("go_build_environment", "{\"GOFLAGS\":\"-tags=two\"}"),
+    ] {
+        let mut different = manifest.clone();
+        different
+            .analysis_versions
+            .insert(name.into(), changed.into());
+        assert!(store.reusable(&different).is_none(), "{name}");
+        different.analysis_versions.remove(name);
+        assert!(store.reusable(&different).is_none(), "missing {name}");
+    }
 }
 
 #[test]

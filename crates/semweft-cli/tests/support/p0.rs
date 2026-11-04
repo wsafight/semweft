@@ -524,6 +524,49 @@ fn go_workspaces_provide_navigation_maps_context_and_two_sided_diff() {
     assert!(diff["configuration_changes"].as_array().unwrap().is_empty());
 }
 
+#[cfg(feature = "go-experimental")]
+#[test]
+fn go_scip_distinguishes_concrete_receiver_calls_from_interface_dispatch() {
+    let ws = Workspace::new();
+    fs::remove_file(ws.root.join("Cargo.toml")).unwrap();
+    fs::remove_file(ws.root.join("src/lib.rs")).unwrap();
+    fs::write(ws.root.join("go.mod"), "module example.com/shop\ngo 1.22\n").unwrap();
+    let source = "package shop\ntype Source interface { Read() int }\ntype Concrete struct{}\nfunc (Concrete) Read() int { return 1 }\nfunc Static(value Concrete) int { return value.Read() }\nfunc Dynamic(value Source) int { return value.Read() }\n";
+    fs::write(ws.root.join("shop.go"), source).unwrap();
+    let inputs = manifest(&ws);
+    let mut occurrences = vec![];
+    for (line, symbol, definition) in [
+        (1, "interface.Read", true),
+        (3, "concrete.Read", true),
+        (4, "concrete.Read", false),
+        (5, "interface.Read", false),
+    ] {
+        let column = source.lines().nth(line).unwrap().find("Read").unwrap() as i32;
+        occurrences.push(occurrence(
+            symbol,
+            &[line as i32, column, column + 4],
+            definition,
+        ));
+    }
+    let path = write_scip(&ws, source, occurrences, false);
+    let mut index = Index::parse_from_bytes(&fs::read(&path).unwrap()).unwrap();
+    index.documents[0].relative_path = "shop.go".into();
+    fs::write(&path, index.write_to_bytes().unwrap()).unwrap();
+    import(&ws, &path, &inputs);
+    for (caller, certainty) in [("Static", "definite"), ("Dynamic", "candidate")] {
+        let report = ws.ok(&["calls", caller, "--source", "L3", "--direction", "callees"]);
+        let relations = report["relations"].as_array().unwrap();
+        assert_eq!(relations.len(), 1, "{report}");
+        assert_eq!(relations[0]["certainty"], certainty, "{report}");
+        if caller == "Static" {
+            assert_eq!(
+                relations[0]["evidence"][0]["derivation"],
+                "scip_occurrence+go_static_dispatch+syntax_callsite"
+            );
+        }
+    }
+}
+
 #[cfg(all(feature = "go-experimental", unix))]
 #[test]
 fn trusted_go_producer_publishes_bindings_and_recovers_after_failure() {
@@ -609,12 +652,9 @@ fn revoking_go_trust_cancels_the_running_producer_promptly() {
             .status
             .success()
     );
+    let revoke_on_failure = super::stability::RevokeTrustOnDrop::new(&ws);
     ws.ok(&["trust", "--accept-build-execution"]);
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while !ws.root.join("started").exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(ws.root.join("started").exists());
+    super::stability::wait_for_file(&ws, &ws.root.join("started"));
     let started = Instant::now();
     ws.ok(&["trust", "--revoke"]);
     loop {
@@ -625,13 +665,19 @@ fn revoking_go_trust_cancels_the_running_producer_promptly() {
         assert!(started.elapsed() < Duration::from_secs(2), "{status}");
         std::thread::sleep(Duration::from_millis(10));
     }
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "revocation took {:?}; {}",
+        started.elapsed(),
+        super::stability::diagnostics(&ws)
+    );
     assert!(!ws.root.join("finished").exists());
+    revoke_on_failure.disarm();
 }
 
 #[cfg(feature = "go-experimental")]
 #[test]
 fn watcher_detects_changes_in_external_go_workspace_members() {
-    use std::time::Instant;
     let ws = Workspace::new();
     fs::remove_file(ws.root.join("Cargo.toml")).unwrap();
     fs::remove_dir_all(ws.root.join("src")).unwrap();
@@ -649,42 +695,12 @@ fn watcher_detects_changes_in_external_go_workspace_members() {
     .unwrap();
     fs::write(ws.root.join("go.work"), "go 1.22\nuse ../external\n").unwrap();
     let before = ws.ok(&["symbol", "Before"]);
-    let watcher = ws
-        .command()
-        .args(["index", "--syntax-only", "--watch"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    struct Stop(Child);
-    impl Drop for Stop {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-    let _stop = Stop(watcher);
-    // A watch lease starts asynchronously; changing the external source is then
-    // detected by the metadata fallback without a query that rescans inputs.
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while ws.ok(&["status"])["clients"]["watch_leases"] == 0 {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    std::thread::sleep(Duration::from_millis(50));
-    fs::write(
-        member.join("code.go"),
-        "package external\nfunc After() {}\n",
-    )
-    .unwrap();
-    loop {
-        let status = ws.ok(&["status"]);
-        if status["snapshot_id"] != before["snapshot_id"] {
-            break;
-        }
-        assert!(Instant::now() < deadline, "{status}");
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    let mut watcher = super::stability::WatchClient::start(&ws);
+    watcher.wait_ready(&ws);
+    let content = "package external\nfunc After() {}\n";
+    fs::write(member.join("code.go"), content).unwrap();
+    let status = watcher.wait_for_hash(&ws, "code.go", Some(content));
+    assert_ne!(status["snapshot_id"], before["snapshot_id"]);
     assert_eq!(ws.ok(&["symbol", "After"])["symbol"]["name"], "After");
 }
 
@@ -774,4 +790,65 @@ fn web_projects_support_navigation_dependencies_and_git_diff_without_node() {
         diff["configuration_changes"].as_array().unwrap().is_empty(),
         "{diff}"
     );
+}
+
+#[cfg(all(feature = "web-experimental", unix))]
+#[test]
+fn trusted_web_scip_refresh_uses_index_command_and_recovers_without_publishing_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let ws = Workspace::new();
+    fs::remove_file(ws.root.join("Cargo.toml")).unwrap();
+    fs::remove_file(ws.root.join("src/lib.rs")).unwrap();
+    fs::write(ws.root.join("package.json"), "{\"name\":\"semantic-web\"}").unwrap();
+    let source =
+        "export function stock() { return 1; }\nexport function order() { return stock(); }\n";
+    fs::write(ws.root.join("src/api.ts"), source).unwrap();
+    let index_path = write_scip(
+        &ws,
+        source,
+        vec![
+            occurrence("stock", &[0, 16, 21], true),
+            occurrence("order", &[1, 16, 21], true),
+            occurrence("stock", &[1, 33, 38], false),
+        ],
+        false,
+    );
+    let mut index = Index::parse_from_bytes(&fs::read(&index_path).unwrap()).unwrap();
+    index.documents[0].relative_path = "src/api.ts".into();
+    fs::write(&index_path, index.write_to_bytes().unwrap()).unwrap();
+    let producer = ws.temp.path().join("web-producer.sh");
+    fs::write(&producer,"#!/bin/sh\n[ \"$1\" = index ] || exit 97\n[ \"$2\" = --output ] || exit 98\n[ ! -f fail ] || exit 99\ncp \"$SCIP_FIXTURE\" \"$3\"\n").unwrap();
+    fs::set_permissions(&producer, fs::Permissions::from_mode(0o700)).unwrap();
+    let initial = ws
+        .command()
+        .env("SEMWEFT_SCIP_TYPESCRIPT", &producer)
+        .env("SCIP_FIXTURE", &index_path)
+        .args(["index", "--syntax-only"])
+        .output()
+        .unwrap();
+    assert!(
+        initial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial.stdout)
+    );
+    ws.ok(&["trust", "--accept-build-execution"]);
+    ws.ok(&["index"]);
+    let refs = ws.ok(&["refs", "stock", "--source", "L3"]);
+    assert_eq!(refs["relations"].as_array().unwrap().len(), 1, "{refs}");
+    fs::write(ws.root.join("fail"), "").unwrap();
+    assert_eq!(
+        ws.run(&["index"]).1["error"]["code"],
+        "index_refresh_failed"
+    );
+    assert_eq!(
+        ws.ok(&["refs", "stock", "--source", "L3"])["relations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    fs::remove_file(ws.root.join("fail")).unwrap();
+    ws.ok(&["index"]);
+    ws.ok(&["trust", "--revoke"]);
+    assert_eq!(ws.run(&["index"]).1["error"]["code"], "trust_required");
 }

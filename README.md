@@ -28,8 +28,10 @@ semweft refs stock --source L3
 semweft impls inventory::Deduct --path crates/inventory
 semweft impls inventory::Deduct::deduct --source L3 --format json
 semweft calls stock --direction callers --depth 3
+semweft path entry stock --max-depth 5 --max-paths 100 --format markdown
 semweft impact --diff WORKTREE --format markdown
 semweft impact --diff origin/main...HEAD --format json
+semweft verify --diff WORKTREE --format markdown
 semweft map --dependencies crate --format mermaid
 semweft context stock --budget 20k
 semweft doctor
@@ -44,9 +46,11 @@ CLI 与 MCP 共用每个工作区的 daemon 和索引。默认使用平台用户
 
 查询可用 `--snapshot-id` 和 `--semantic-epoch` 固定分析视图，用 `--cursor` 接续分页；旧视图不会被后续编辑覆盖。历史引用用 `refs --include-stale --stale-from <snapshot_id> --stale-semantic-epoch <epoch>` 显式读取，与当前引用分开。预算不足时上下文逐项降为签名、大纲或位置，并提供省略清单游标。上下文 JSON 使用紧凑序列化，`estimated` 按完整响应的 UTF-8 字节数估算；支持离线精确 tokenizer `cl100k_base@tiktoken-rs-0.12.1`、`o200k_base@tiktoken-rs-0.12.1`，按最终完整 JSON（包括元数据和省略页）计数。当前最小预算为 4096，未知 tokenizer 回退到估算并说明原因。
 
-stdout 是终端时默认 text，否则默认 JSON；还支持 Markdown，以及 `map` 的 Mermaid/DOT。JSON 字段中的缺口、pending 和截断均需保留在调用方的判断中。退出码 0 表示取得结果，普通查询的 partial 也可成功；2 表示参数或目标问题，4 表示需要仓库授权，5 表示索引、工具或服务失败，130 表示取消。
+stdout 是终端时默认 text，否则默认 JSON；还支持 Markdown，以及 `map` 的 Mermaid/DOT。JSON 字段中的缺口、pending 和截断均需保留在调用方的判断中。普通查询退出码 0 表示取得结果，partial 也可成功；`verify` 按核验状态返回 0（声明规则内未发现违规）、1（发现确定违规）或 3（证据不足）。2 表示参数或目标问题，4 表示需要仓库授权，5 表示索引、工具或服务失败，130 表示取消。
 
-基础查询与刷新服务已提取为独立 [semweft-query](crates/semweft-query/README.md)，可直接嵌入其他 Rust 程序。存储按需压缩，支持 `snapshots usage`、`snapshots gc --dry-run --max-bytes N` 和 `snapshots compact`；分页缓存同时限制游标数量和共享载荷字节。独立 `semweft-bench` 支持冻结输入、多轮新进程及同输入对照，见[第二轮基础层记录](docs/performance-next.md)。
+`verify` 复用 diff 两侧的候选影响，运行四条有版本的内置审查规则：配置变化、分析缺口、残留名称引用和候选影响关系。响应包含 `verification` 全量结论及逐规则状态，以及可分页的 `findings`；证据保留快照、来源、确定性与源码位置。当前规则只产生 warning / `insufficient_evidence`，不判断 API 兼容性，也不执行编译或测试。当前索引始终披露 L1 名称绑定缺口，因此通常返回 3；分页或展示裁剪不会把结论改为通过。
+
+基础查询与刷新服务已提取为独立 [semweft-query](crates/semweft-query/README.md)，可直接嵌入其他 Rust 程序。存储按需压缩，支持 `snapshots usage`、`snapshots gc --dry-run --max-bytes N` 和 `snapshots compact`；分页缓存同时限制游标数量和共享载荷字节。独立 `semweft-bench` 支持冻结输入、多轮新进程及同输入对照，见[第二轮基础层记录](docs/foundations.md#第二轮基础层开发记录)。
 
 ## 桌面工作台（macOS · GPUI + gpui-rsx）
 
@@ -96,7 +100,15 @@ Go 语法与结构查询不需要 Go 工具链；语义刷新运行外部 `scip-
 }
 ```
 
-提供 `capabilities`、`index_status`、`repo_map`、`search_symbols`、`symbol_at`、`get_symbol`、`find_references`、`find_implementations`、`call_graph`、`impact_of`、`context_pack` 11 个只读工具，入参 schema 随 `capabilities` 和 MCP tools/list 返回。本次 v0.2 增量仅接入 `find_implementations` / `impls`；`verify_change` 尚未接入，其他未来工具仍按路线图推进。信任与重建走 CLI 控制通道。使用官方 Rust SDK rmcp 的 stdio 传输，协议流不包含 daemon 日志。
+提供 19 个只读工具，入参 schema 随 `capabilities` 和 MCP tools/list 返回。已有导航、实现查询、diff 核验、调用路径和测试候选；新增 `arch_check`、`agent_preflight`、`agent_verify`、`get_review_result`、`contract_impact`。CLI/MCP 还提供 [Rust 库 API 候选](docs/public-api.md)、[显式服务依赖/路径/循环](docs/services.md)、架构基线、Hooks 适配、审查归档与自包含 HTML。使用与边界见 [护栏指南](docs/guardrails.md)、[Protobuf 分析](docs/contracts.md)及 [20 项清单](docs/product-next.md)；Go/TS 正式验收仍未完成。信任、重建和写入归档走 CLI 控制通道。MCP 使用 rmcp stdio，协议流不包含 daemon 日志。
+
+`semweft tests <symbol>` 或 `semweft tests --suggested --diff WORKTREE` 根据反向调用/引用路径推荐显式 Rust 测试入口，支持 JSON/text/Markdown、过滤、预算与固定视图分页。报告区分当前、ignored 和仅旧版本的测试，保留每条证据路径；不会执行测试，也没有逐测试覆盖率。候选绑定确定性不表示运行覆盖，零候选不能证明无需测试。自定义/生成测试入口及其他语言入口尚未支持。
+
+Diff 报告同时提供 `diff_summary`、`affected_modules`、`affected_services` 和 `risk_summary`：按两侧源文件及显式服务映射聚合变更、影响关系与残留引用，摘要保持全量计数，列表可分页。`heuristic_v2` 提供六维风险分数，可导入源码绑定的 LCOV 和冻结 Git 热点，详见[风险输入](docs/risk-inputs.md)。公开语法声明不等于外部可达 API；Rust 外部 API 候选另见[公开 API](docs/public-api.md)。内联模块尚未拆成独立依赖节点。
+
+CI 可用 `semweft verify --diff <selector> --all-pages --format json` 固定并导出完整核验结果，再用 `semweft report --input verify.json --format markdown|sarif` 离线生成报告。SARIF 2.1.0 仅映射核验 findings；JSON、Markdown 和 SARIF 保留证据不足语义与核验退出码。GitHub Actions / GitLab 示例和权限边界见 [CI 报告说明](docs/ci.md)。
+
+`path <from> <to>` 枚举已索引符号间的简单调用路径，保留逐边来源、确定性与源码位置，支持深度、路径数量、节点和时间预算。环中的同一符号不会重复，独立调用点形成不同路径；同一符号到自身返回一条零边路径。`--scope module|service` 查询源文件或显式服务的聚合依赖路径，每跳保留调用见证，相邻跳不保证来自同一函数。路径枚举完成只针对已索引图，完整性缺口仍保留，详见[服务映射](docs/services.md)。原始开发顺序与进度见 [20 项产品功能清单](docs/product-next.md)。
 
 `impls` 接收 Rust trait 或 trait 方法，`--path` 过滤实现所在路径，并支持关系查询的来源、确定性、新鲜度与通用快照、分页参数。它返回已索引的显式实现，L1 名称候选与 L3 语义证据分开披露，测试作用域单独标注；默认方法继承单独计数。L3 可独立识别 use 别名，只有语义绑定而无语法名称匹配的别名实现不附 L1 name_match 证据，`--source L1` 不返回它。仅 `relations` 分页，过滤后的完整计数、`inherited_defaults` 和 `excluded_candidates` 随每页返回。宏与 derive 生成实现、blanket impl 覆盖类型枚举、未索引的依赖和下游实现仍有缺口；无语义证据时不解析导入和遮蔽，不能把同名候选当作已绑定实现。字段与缺口见[接口契约](docs/interfaces.md#find_implementationsrust-trait-实现查询v02-增量)。
 
@@ -132,6 +144,10 @@ Diff 分析先保留两侧唯一的精确匹配，再按双向唯一的语法指
 - [路线图、风险与决策](docs/roadmap.md)：版本门槛与待决策事项
 
 协议设计与前置原型门槛见[路线图](docs/roadmap.md)，决策状态统一维护于该文第 4 节。
+
+## 风险输入
+
+变更风险可选接入快照绑定的 LCOV 行观测与冻结 Git 历史：使用 `semweft risk-inputs` 生成 artifact，再传给 diff 命令的 `--risk-inputs` / `--base-risk-inputs`，或给 `guard before --risk-inputs` 提供修改前观测。输入缺失或过期不会伪装成已证实低风险，不自动执行测试。用法与 `heuristic_v2` 六维公式见 [风险输入指南](docs/risk-inputs.md)。
 
 ## 许可
 

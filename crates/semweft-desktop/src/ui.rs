@@ -883,6 +883,10 @@ fn gap_description(kind: &str) -> (&'static str, &'static str) {
             "宏生成的引用需要结合源码与测试进一步核查。",
         ),
         "closure_owner_not_modeled" => ("闭包归属尚未建模", "闭包内的调用尚未完整归属到外围符号。"),
+        "callback_invocation_not_modeled" => (
+            "回调调用尚未建模",
+            "函数体已有独立归属；尚未推断回调调用方及动态传递。",
+        ),
         _ => (
             "分析范围缺口",
             "该项已由引擎报告。具体字段与原始证据可通过导出报告查看。",

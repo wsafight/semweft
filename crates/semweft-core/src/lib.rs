@@ -174,6 +174,7 @@ pub enum TargetDerivation {
     Definition,
     Implementation,
     ScipBinding,
+    ScipGoStaticBinding,
 }
 
 impl TargetDerivation {
@@ -182,6 +183,7 @@ impl TargetDerivation {
             Self::Definition => "lsp_definition+syntax_callsite",
             Self::Implementation => "lsp_implementation+syntax_callsite",
             Self::ScipBinding => "scip_occurrence+syntax_callsite",
+            Self::ScipGoStaticBinding => "scip_occurrence+go_static_dispatch+syntax_callsite",
         }
     }
 }

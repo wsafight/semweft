@@ -1,0 +1,1615 @@
+{
+  "schema_version": "0.1",
+  "annotation_method": "Source inspection before running Semweft or SCIP on these projections. Convenience sample of 10 local declaration bindings per repository, plus parameter-call uncertainty in pflag and trace-mapping. Source review distinguishes direct/static dispatch from five TypeScript virtual-method declaration bindings; virtual bindings are measured separately and must not become definite runtime calls. One sort-call text anchor was corrected after checking its source coordinate. Authored by Codex; no independent human audit, random sampling, or population-wide confidence claim. Targets come from source declarations, not producer output. JavaScript additions cover clsx, mri and all four klona source variants: 28 local helper/recursive calls and two input-supplied callback/constructor cases, labelled from source before indexing these projects.",
+  "repositories": [
+    {
+      "id": "uuid",
+      "repository": "https://github.com/google/uuid",
+      "revision": "0f11ee6918f41a04c201eceeadf612a377bc7fbc",
+      "language": "go",
+      "files": {
+        "LICENSE": "5dc68268d900581915a7bfdc1f2be75cd503dd9e",
+        "dce.go": "fa820b9d3092b433238026b451eca869387d91fb",
+        "doc.go": "5b8a4b9af8ce30230b0541d1ab3d2aa63d637739",
+        "go.mod": "fc84cd79d4c79a2ad598d6c5285473aa32b34982",
+        "hash.go": "dc60082d3b3b108bb5b15207fdd6df7e89455710",
+        "marshal.go": "14bd34072b64d2c9cd0491d00454e593af99e1e2",
+        "node.go": "d651a2b0619fa44b7f24cdaf731197e6c1023863",
+        "node_js.go": "b2a0bc8711b3dcab80f2b96050b318b5748cff70",
+        "node_net.go": "0cbbcddbd6e81da612534338c786a4e111bc0a04",
+        "null.go": "d7fcbf28651697b00add519d8b4402a5ab46ffc2",
+        "sql.go": "2e02ec06c0121d1c82a8b07275091549f9a0c950",
+        "time.go": "c351129279f32127baf9415e3fdb018ac55f9760",
+        "util.go": "5ea6c737806e68a6d0457e65d97bb3414cb22953",
+        "uuid.go": "5232b486780d605d2c6bcc0b268bf93ba4e309c8",
+        "version1.go": "463109629eee180e87507373a3e957e72c34f179",
+        "version4.go": "7697802e4d16b255e7ea22a86071cfbe9af6aa39",
+        "version6.go": "339a959a7a2629181683466d3bef1edc83c9db28",
+        "version7.go": "3167b643d4594ab190d6c1348fb03530f82a11fe"
+      },
+      "labels": [
+        {
+          "id": "uuid-01",
+          "dispatch": "direct",
+          "call": {
+            "file": "version4.go",
+            "text": "return Must(NewRandom())",
+            "token": "Must",
+            "occurrence": 0
+          },
+          "target": {
+            "file": "uuid.go",
+            "text": "func Must(uuid UUID, err error) UUID",
+            "token": "Must"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "uuid-02",
+          "dispatch": "direct",
+          "call": {
+            "file": "version4.go",
+            "text": "return Must(NewRandom())",
+            "token": "NewRandom",
+            "occurrence": 0
+          },
+          "target": {
+            "file": "version4.go",
+            "text": "func NewRandom() (UUID, error)",
+            "token": "NewRandom"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "uuid-03",
+          "dispatch": "direct",
+          "call": {
+            "file": "version4.go",
+            "text": "return Must(NewRandom()).String()",
+            "token": "String"
+          },
+          "target": {
+            "file": "uuid.go",
+            "text": "func (uuid UUID) String() string",
+            "token": "String"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "uuid-04",
+          "dispatch": "direct",
+          "call": {
+            "file": "version4.go",
+            "text": "return NewRandomFromReader(rander)",
+            "token": "NewRandomFromReader"
+          },
+          "target": {
+            "file": "version4.go",
+            "text": "func NewRandomFromReader(r io.Reader) (UUID, error)",
+            "token": "NewRandomFromReader"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "uuid-05",
+          "dispatch": "direct",
+          "call": {
+            "file": "version4.go",
+            "text": "return newRandomFromPool()",
+            "token": "newRandomFromPool"
+          },
+          "target": {
+            "file": "version4.go",
+            "text": "func newRandomFromPool() (UUID, error)",
+            "token": "newRandomFromPool"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "uuid-06",
+          "dispatch": "direct",
+          "call": {
+            "file": "uuid.go",
+            "text": "uuid, err := Parse(s)",
+            "token": "Parse"
+          },
+          "target": {
+            "file": "uuid.go",
+            "text": "func Parse(s string) (UUID, error)",
+            "token": "Parse"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "uuid-07",
+          "dispatch": "direct",
+          "call": {
+            "file": "uuid.go",
+            "text": "err = uuid.UnmarshalBinary(b)",
+            "token": "UnmarshalBinary"
+          },
+          "target": {
+            "file": "marshal.go",
+            "text": "func (uuid *UUID) UnmarshalBinary(data []byte) error",
+            "token": "UnmarshalBinary"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "uuid-08",
+          "dispatch": "direct",
+          "call": {
+            "file": "version1.go",
+            "text": "now, seq, err := GetTime()",
+            "token": "GetTime"
+          },
+          "target": {
+            "file": "time.go",
+            "text": "func GetTime() (Time, uint16, error)",
+            "token": "GetTime"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "uuid-09",
+          "dispatch": "direct",
+          "call": {
+            "file": "version6.go",
+            "text": "now, seq, err := GetTime()",
+            "token": "GetTime"
+          },
+          "target": {
+            "file": "time.go",
+            "text": "func GetTime() (Time, uint16, error)",
+            "token": "GetTime"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "uuid-10",
+          "dispatch": "direct",
+          "call": {
+            "file": "version1.go",
+            "text": "setNodeInterface(\"\")",
+            "token": "setNodeInterface"
+          },
+          "target": {
+            "file": "node.go",
+            "text": "func setNodeInterface(name string) bool",
+            "token": "setNodeInterface"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        }
+      ],
+      "edit": {
+        "file": "version4.go",
+        "old": "func New() UUID {\n\treturn Must(NewRandom())\n}",
+        "new": "func New() UUID {\n\treturn Must(NewUUID())\n}"
+      }
+    },
+    {
+      "id": "xxhash",
+      "repository": "https://github.com/cespare/xxhash",
+      "revision": "998dce232f17418a7a5721ecf87ca714025a3243",
+      "language": "go",
+      "files": {
+        "LICENSE.txt": "24b53065f40b5d7d277a64375956ec19cb2123c5",
+        "go.mod": "49f67608bf6bbe42bd59795394f342ac3a113ae1",
+        "go.sum": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+        "xxhash.go": "78bddf1ceed747148b3b9ef8113fcf3296fedb60",
+        "xxhash_amd64.s": "3e8b132579ec2ea32773fd3839f63e2a772b4ad6",
+        "xxhash_arm64.s": "7e3145a221864ce239a75de489dd94cf0660179d",
+        "xxhash_asm.go": "78f95f2561037eacabadb2590525338b5bf0498c",
+        "xxhash_other.go": "118e49e819e00ab3279057bb958df003ddce2380",
+        "xxhash_safe.go": "05f5e7dfe7b72bbb0edb82b03151e58cddcc3f1b",
+        "xxhash_unsafe.go": "cf9d42aed536922c3a113a5b1fa475acb98d592f"
+      },
+      "labels": [
+        {
+          "id": "xxhash-01",
+          "dispatch": "direct",
+          "call": {
+            "file": "xxhash.go",
+            "text": "return NewWithSeed(0)",
+            "token": "NewWithSeed"
+          },
+          "target": {
+            "file": "xxhash.go",
+            "text": "func NewWithSeed(seed uint64) *Digest",
+            "token": "NewWithSeed"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "xxhash-02",
+          "dispatch": "direct",
+          "call": {
+            "file": "xxhash.go",
+            "text": "d.ResetWithSeed(seed)",
+            "token": "ResetWithSeed"
+          },
+          "target": {
+            "file": "xxhash.go",
+            "text": "func (d *Digest) ResetWithSeed(seed uint64)",
+            "token": "ResetWithSeed"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "xxhash-03",
+          "dispatch": "direct",
+          "call": {
+            "file": "xxhash.go",
+            "text": "d.ResetWithSeed(0)",
+            "token": "ResetWithSeed"
+          },
+          "target": {
+            "file": "xxhash.go",
+            "text": "func (d *Digest) ResetWithSeed(seed uint64)",
+            "token": "ResetWithSeed"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "xxhash-04",
+          "dispatch": "direct",
+          "call": {
+            "file": "xxhash.go",
+            "text": "s := d.Sum64()",
+            "token": "Sum64"
+          },
+          "target": {
+            "file": "xxhash.go",
+            "text": "func (d *Digest) Sum64() uint64",
+            "token": "Sum64"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "xxhash-05",
+          "dispatch": "direct",
+          "call": {
+            "file": "xxhash.go",
+            "text": "h = mergeRound(h, v1)",
+            "token": "mergeRound"
+          },
+          "target": {
+            "file": "xxhash.go",
+            "text": "func mergeRound(acc, val uint64) uint64",
+            "token": "mergeRound"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "xxhash-06",
+          "dispatch": "direct",
+          "call": {
+            "file": "xxhash.go",
+            "text": "k1 := round(0, u64(b[:8]))",
+            "token": "round"
+          },
+          "target": {
+            "file": "xxhash.go",
+            "text": "func round(acc, input uint64) uint64",
+            "token": "round"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "xxhash-07",
+          "dispatch": "direct",
+          "call": {
+            "file": "xxhash.go",
+            "text": "k1 := round(0, u64(b[:8]))",
+            "token": "u64"
+          },
+          "target": {
+            "file": "xxhash.go",
+            "text": "func u64(b []byte) uint64",
+            "token": "u64"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "xxhash-08",
+          "dispatch": "direct",
+          "call": {
+            "file": "xxhash.go",
+            "text": "h = rol23(h)*prime2 + prime3",
+            "token": "rol23"
+          },
+          "target": {
+            "file": "xxhash.go",
+            "text": "func rol23(x uint64) uint64",
+            "token": "rol23"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "xxhash-09",
+          "dispatch": "direct",
+          "call": {
+            "file": "xxhash.go",
+            "text": "h = rol11(h) * prime1",
+            "token": "rol11"
+          },
+          "target": {
+            "file": "xxhash.go",
+            "text": "func rol11(x uint64) uint64",
+            "token": "rol11"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "xxhash-10",
+          "dispatch": "direct",
+          "call": {
+            "file": "xxhash.go",
+            "text": "h = rol27(h)*prime1 + prime4",
+            "token": "rol27"
+          },
+          "target": {
+            "file": "xxhash.go",
+            "text": "func rol27(x uint64) uint64",
+            "token": "rol27"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        }
+      ],
+      "edit": {
+        "file": "xxhash.go",
+        "old": "return NewWithSeed(0)",
+        "new": "return NewWithSeed(1)"
+      }
+    },
+    {
+      "id": "pflag",
+      "repository": "https://github.com/spf13/pflag",
+      "revision": "2e9d26c8c37aae03e3f9d4e90b7116f5accb7cab",
+      "language": "go",
+      "files": {
+        "LICENSE": "63ed1cfea1fb28c2051b00a3ae05a0b2cae7ce6a",
+        "bool.go": "c4c5c0bfda095257e849395a0b79e7e83b2a121a",
+        "bool_slice.go": "3731370d6a572a264f3f953fb574ef5e770bb34d",
+        "bytes.go": "67d53045708fec86213c7b79e055b52cb1c5d791",
+        "count.go": "a0b2679f71c7549c103f867e70f2c2b73e8c9099",
+        "duration.go": "e9debef88ee08abab1332c5359c76b693577ded9",
+        "duration_slice.go": "badadda53fdbc4d49ac6a874ebebdd3567cb25c6",
+        "flag.go": "24a5036e95b61b7dd9a66674ee897cf4768a5c06",
+        "float32.go": "a243f81f7fbb900c5f69b3a13b040bfe26b8cecf",
+        "float32_slice.go": "caa352741a603952255ce4c5c532f1c505e14c83",
+        "float64.go": "04b5492a7d365cbfb9e979055151ec13698b3cb1",
+        "float64_slice.go": "85bf3073d5064d7539c9153fb7acf085d43a3f80",
+        "go.mod": "b2287eec13482801cae47dacc0f1f9005562d889",
+        "go.sum": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+        "golangflag.go": "d3dd72b7feed6744b897518f6a468ff7bacab69f",
+        "int.go": "1474b89df6654b1ddcc9d3107f54966aa67e72a2",
+        "int16.go": "f1a01d05e6946c68062903ebb0081741e65ff5c2",
+        "int32.go": "9b95944f0fe3c897d503c4a94a19c2271cbcc26c",
+        "int32_slice.go": "ff128ff06d869653f3cc3ed8b50204f7a7a0503e",
+        "int64.go": "0026d781d9fb8ee93031d279223f46793fa98eb8",
+        "int64_slice.go": "25464638f3ab60c17e73617abe428c55f6cf8c6e",
+        "int8.go": "4da92228e63e24f3c3ecfcc98493ca222fa797c0",
+        "int_slice.go": "e71c39d91aa710719e1ab9d1ba101015e2545d04",
+        "ip.go": "3d414ba69fe1d3881c1551a5cdf2850b3886d35a",
+        "ip_slice.go": "775faae4fd8d2bb79954058dedc0ff950535e9d6",
+        "ipmask.go": "5bd44bd21d27ee553e2828f80190673c8ad2c6e8",
+        "ipnet.go": "e2c1b8bcd53a53f9134a6e33741d32b9a31cdfba",
+        "string.go": "04e0a26ff7f2653b7c569dabe8cb91296d76e288",
+        "string_array.go": "4894af818023bf132665556333e84426f80d7cc8",
+        "string_slice.go": "3cb2e69dba026d8a451f67f71e21fdff780ea58c",
+        "string_to_int.go": "5ceda3965dfeb3080e613f08a79343a72d702231",
+        "string_to_int64.go": "a807a04a0bad8348fc3f2ab720e723e512c8dfb5",
+        "string_to_string.go": "890a01afc030044c028766cc5d988255db86eacb",
+        "uint.go": "dcbc2b758c3e54aa0c87467680ceed3896b7f429",
+        "uint16.go": "7e9914eddded70662356d132d2b16623c9bd807c",
+        "uint32.go": "d8024539bf6510282ced06b7f27fcdec6e0e5cb9",
+        "uint64.go": "f62240f2ceab10a28d1ff206a8071ad2f2afa1cd",
+        "uint8.go": "bb0e83c1f6d7d2a540f74a0652639eccdb8c5cf2",
+        "uint_slice.go": "5fa924835ed3f52841cc50a58aa5a4fcb9ed68c2"
+      },
+      "labels": [
+        {
+          "id": "pflag-01",
+          "dispatch": "direct",
+          "call": {
+            "file": "int.go",
+            "text": "val, err := f.getFlagType(name, \"int\", intConv)",
+            "token": "getFlagType"
+          },
+          "target": {
+            "file": "flag.go",
+            "text": "func (f *FlagSet) getFlagType(name string, ftype string, convFunc func(sval string) (interface{}, error))",
+            "token": "getFlagType"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "pflag-02",
+          "dispatch": "direct",
+          "call": {
+            "file": "int.go",
+            "text": "f.VarP(newIntValue(value, p), name, \"\", usage)",
+            "token": "VarP"
+          },
+          "target": {
+            "file": "flag.go",
+            "text": "func (f *FlagSet) VarP(value Value, name, shorthand, usage string)",
+            "token": "VarP"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "pflag-03",
+          "dispatch": "direct",
+          "call": {
+            "file": "int.go",
+            "text": "f.VarP(newIntValue(value, p), name, \"\", usage)",
+            "token": "newIntValue"
+          },
+          "target": {
+            "file": "int.go",
+            "text": "func newIntValue(val int, p *int) *intValue",
+            "token": "newIntValue"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "pflag-04",
+          "dispatch": "direct",
+          "call": {
+            "file": "int.go",
+            "text": "f.VarP(newIntValue(value, p), name, shorthand, usage)",
+            "token": "VarP"
+          },
+          "target": {
+            "file": "flag.go",
+            "text": "func (f *FlagSet) VarP(value Value, name, shorthand, usage string)",
+            "token": "VarP"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "pflag-05",
+          "dispatch": "direct",
+          "call": {
+            "file": "int.go",
+            "text": "f.VarP(newIntValue(value, p), name, shorthand, usage)",
+            "token": "newIntValue"
+          },
+          "target": {
+            "file": "int.go",
+            "text": "func newIntValue(val int, p *int) *intValue",
+            "token": "newIntValue"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "pflag-06",
+          "dispatch": "direct",
+          "call": {
+            "file": "int.go",
+            "text": "CommandLine.VarP(newIntValue(value, p), name, \"\", usage)",
+            "token": "VarP"
+          },
+          "target": {
+            "file": "flag.go",
+            "text": "func (f *FlagSet) VarP(value Value, name, shorthand, usage string)",
+            "token": "VarP"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "pflag-07",
+          "dispatch": "direct",
+          "call": {
+            "file": "int.go",
+            "text": "CommandLine.VarP(newIntValue(value, p), name, \"\", usage)",
+            "token": "newIntValue"
+          },
+          "target": {
+            "file": "int.go",
+            "text": "func newIntValue(val int, p *int) *intValue",
+            "token": "newIntValue"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "pflag-08",
+          "dispatch": "direct",
+          "call": {
+            "file": "int.go",
+            "text": "f.IntVarP(p, name, \"\", value, usage)",
+            "token": "IntVarP"
+          },
+          "target": {
+            "file": "int.go",
+            "text": "func (f *FlagSet) IntVarP(p *int, name, shorthand string, value int, usage string)",
+            "token": "IntVarP"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "pflag-09",
+          "dispatch": "direct",
+          "call": {
+            "file": "int.go",
+            "text": "f.IntVarP(p, name, shorthand, value, usage)",
+            "token": "IntVarP"
+          },
+          "target": {
+            "file": "int.go",
+            "text": "func (f *FlagSet) IntVarP(p *int, name, shorthand string, value int, usage string)",
+            "token": "IntVarP"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "pflag-10",
+          "dispatch": "direct",
+          "call": {
+            "file": "int.go",
+            "text": "return CommandLine.IntP(name, \"\", value, usage)",
+            "token": "IntP"
+          },
+          "target": {
+            "file": "int.go",
+            "text": "func (f *FlagSet) IntP(name, shorthand string, value int, usage string) *int",
+            "token": "IntP"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "pflag-11",
+          "dispatch": "parameter",
+          "call": {
+            "file": "flag.go",
+            "text": "fn(flag)",
+            "token": "fn",
+            "occurrence": 0
+          },
+          "target": null,
+          "rationale": "Parameter callback supplied by callers; no unique implementation is established by this source."
+        }
+      ],
+      "edit": {
+        "file": "int.go",
+        "old": "strconv.ParseInt(s, 0, 64)",
+        "new": "strconv.ParseInt(s, 10, 64)"
+      }
+    },
+    {
+      "id": "resolve-uri",
+      "repository": "https://github.com/jridgewell/resolve-uri",
+      "revision": "caa7a299d6c688570773c81732f77d3c7035ded6",
+      "language": "typescript",
+      "files": {
+        "package.json": "02a4c5187e7ca726d36ff24dda674400b1c3f846",
+        "src/resolve-uri.ts": "ffa0e0165f1ec43440671c1a869d6f1f287f0402",
+        "tsconfig.json": "2f4907fe136efaa44e8a69317a117d6e81065e6e"
+      },
+      "labels": [
+        {
+          "id": "resolve-uri-01",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/resolve-uri.ts",
+            "text": "return makeUrl(\n    match[1],",
+            "token": "makeUrl"
+          },
+          "target": {
+            "file": "src/resolve-uri.ts",
+            "text": "function makeUrl(",
+            "token": "makeUrl"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "resolve-uri-02",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/resolve-uri.ts",
+            "text": "isAbsolutePath(path) ? path : '/' + path",
+            "token": "isAbsolutePath"
+          },
+          "target": {
+            "file": "src/resolve-uri.ts",
+            "text": "function isAbsolutePath(input: string): boolean",
+            "token": "isAbsolutePath"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "resolve-uri-03",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/resolve-uri.ts",
+            "text": "if (isSchemeRelativeUrl(input))",
+            "token": "isSchemeRelativeUrl"
+          },
+          "target": {
+            "file": "src/resolve-uri.ts",
+            "text": "function isSchemeRelativeUrl(input: string): boolean",
+            "token": "isSchemeRelativeUrl"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "resolve-uri-04",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/resolve-uri.ts",
+            "text": "const url = parseAbsoluteUrl('http:' + input)",
+            "token": "parseAbsoluteUrl"
+          },
+          "target": {
+            "file": "src/resolve-uri.ts",
+            "text": "function parseAbsoluteUrl(input: string): Url",
+            "token": "parseAbsoluteUrl"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "resolve-uri-05",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/resolve-uri.ts",
+            "text": "if (isFileUrl(input)) return parseFileUrl(input)",
+            "token": "isFileUrl"
+          },
+          "target": {
+            "file": "src/resolve-uri.ts",
+            "text": "function isFileUrl(input: string): boolean",
+            "token": "isFileUrl"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "resolve-uri-06",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/resolve-uri.ts",
+            "text": "if (isFileUrl(input)) return parseFileUrl(input)",
+            "token": "parseFileUrl"
+          },
+          "target": {
+            "file": "src/resolve-uri.ts",
+            "text": "function parseFileUrl(input: string): Url",
+            "token": "parseFileUrl"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "resolve-uri-07",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/resolve-uri.ts",
+            "text": "normalizePath(base, base.type)",
+            "token": "normalizePath"
+          },
+          "target": {
+            "file": "src/resolve-uri.ts",
+            "text": "function normalizePath(url: Url, type: UrlType)",
+            "token": "normalizePath"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "resolve-uri-08",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/resolve-uri.ts",
+            "text": "stripPathFilename(base.path) + url.path",
+            "token": "stripPathFilename"
+          },
+          "target": {
+            "file": "src/resolve-uri.ts",
+            "text": "function stripPathFilename(path: string): string",
+            "token": "stripPathFilename"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "resolve-uri-09",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/resolve-uri.ts",
+            "text": "const url = parseUrl(input)",
+            "token": "parseUrl"
+          },
+          "target": {
+            "file": "src/resolve-uri.ts",
+            "text": "function parseUrl(input: string): Url",
+            "token": "parseUrl"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "resolve-uri-10",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/resolve-uri.ts",
+            "text": "mergePaths(url, baseUrl)",
+            "token": "mergePaths"
+          },
+          "target": {
+            "file": "src/resolve-uri.ts",
+            "text": "function mergePaths(url: Url, base: Url)",
+            "token": "mergePaths"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        }
+      ],
+      "edit": {
+        "file": "src/resolve-uri.ts",
+        "old": "if (!path) return queryHash || '.';",
+        "new": "if (!path) return queryHash || './';"
+      }
+    },
+    {
+      "id": "sourcemap-codec",
+      "repository": "https://github.com/jridgewell/sourcemap-codec",
+      "revision": "d8dc7fc3f7602043f56f3efa801569f983d756ec",
+      "language": "typescript",
+      "files": {
+        "package.json": "7168efcae7aa1ab1b9fa11437c37a5b03ea0e50c",
+        "src/scopes.ts": "d194c2f0a66567fdc42e7d4bddc79a5e5d1ad005",
+        "src/sourcemap-codec.ts": "a81f894dc1f18937c58978ee1351b6e70bbc8c86",
+        "src/strings.ts": "4ee16fa0a6a61aaee641473ed6391e04d8ff9780",
+        "src/vlq.ts": "a42c681511bbec0faecd9aeb9e6e7d5dbea0e391",
+        "tsconfig.json": "a03f3974ef05f306f4835cd64cb45477f452d3a2"
+      },
+      "labels": [
+        {
+          "id": "sourcemap-codec-01",
+          "dispatch": "virtual",
+          "call": {
+            "file": "src/sourcemap-codec.ts",
+            "text": "const semi = reader.indexOf(';')",
+            "token": "indexOf"
+          },
+          "target": {
+            "file": "src/strings.ts",
+            "text": "indexOf(char: string): number",
+            "token": "indexOf"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "sourcemap-codec-02",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/sourcemap-codec.ts",
+            "text": "genColumn = decodeInteger(reader, genColumn)",
+            "token": "decodeInteger"
+          },
+          "target": {
+            "file": "src/vlq.ts",
+            "text": "export function decodeInteger(reader: StringReader, relative: number): number",
+            "token": "decodeInteger"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "sourcemap-codec-03",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/sourcemap-codec.ts",
+            "text": "sourcesIndex = decodeInteger(reader, sourcesIndex)",
+            "token": "decodeInteger"
+          },
+          "target": {
+            "file": "src/vlq.ts",
+            "text": "export function decodeInteger(reader: StringReader, relative: number): number",
+            "token": "decodeInteger"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "sourcemap-codec-04",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/sourcemap-codec.ts",
+            "text": "if (hasMoreVlq(reader, semi))",
+            "token": "hasMoreVlq",
+            "occurrence": 0
+          },
+          "target": {
+            "file": "src/vlq.ts",
+            "text": "export function hasMoreVlq(reader: StringReader, max: number)",
+            "token": "hasMoreVlq"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "sourcemap-codec-05",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/sourcemap-codec.ts",
+            "text": "sort(line);",
+            "token": "sort"
+          },
+          "target": {
+            "file": "src/sourcemap-codec.ts",
+            "text": "function sort(line: SourceMapSegment[])",
+            "token": "sort"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "sourcemap-codec-06",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/sourcemap-codec.ts",
+            "text": "genColumn = encodeInteger(writer, segment[0], genColumn)",
+            "token": "encodeInteger"
+          },
+          "target": {
+            "file": "src/vlq.ts",
+            "text": "export function encodeInteger(builder: StringWriter, num: number, relative: number): number",
+            "token": "encodeInteger"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "sourcemap-codec-07",
+          "dispatch": "virtual",
+          "call": {
+            "file": "src/sourcemap-codec.ts",
+            "text": "return writer.flush()",
+            "token": "flush"
+          },
+          "target": {
+            "file": "src/strings.ts",
+            "text": "flush(): string",
+            "token": "flush"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "sourcemap-codec-08",
+          "dispatch": "virtual",
+          "call": {
+            "file": "src/vlq.ts",
+            "text": "const c = reader.next()",
+            "token": "next"
+          },
+          "target": {
+            "file": "src/strings.ts",
+            "text": "next(): number",
+            "token": "next"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "sourcemap-codec-09",
+          "dispatch": "virtual",
+          "call": {
+            "file": "src/vlq.ts",
+            "text": "builder.write(intToChar[clamped])",
+            "token": "write"
+          },
+          "target": {
+            "file": "src/strings.ts",
+            "text": "write(v: number): void",
+            "token": "write"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "sourcemap-codec-10",
+          "dispatch": "virtual",
+          "call": {
+            "file": "src/vlq.ts",
+            "text": "return reader.peek() !== comma",
+            "token": "peek"
+          },
+          "target": {
+            "file": "src/strings.ts",
+            "text": "peek(): number",
+            "token": "peek"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        }
+      ],
+      "edit": {
+        "file": "src/sourcemap-codec.ts",
+        "old": "let sorted = true;",
+        "new": "let sorted = false;"
+      }
+    },
+    {
+      "id": "trace-mapping",
+      "repository": "https://github.com/jridgewell/trace-mapping",
+      "revision": "8ee48a950fb730823fc6bc661390444437e4ef98",
+      "language": "typescript",
+      "files": {
+        "package.json": "454a1bdbe09cc0c933259b719389cec03c4622b2",
+        "src/any-map.ts": "347ce812f7e0728ff20ab772787dc5db04d096f8",
+        "src/binary-search.ts": "c1144ad1cdcdf6dcdfbfe3fed3f4daeeb2b1bd8d",
+        "src/by-source.ts": "2af1cf05e1d51efc29a638e70f78a5035d4189e0",
+        "src/resolve.ts": "8ef7db78ffba2ae00411265fa7a5a4c3072e522e",
+        "src/sort.ts": "61213c80172408c7d6e8b29e8d15cfb2ae5ac73f",
+        "src/sourcemap-segment.ts": "94f1b6ab0d675ecdf00cd0416bcb228cba1ba604",
+        "src/strip-filename.ts": "2c889800e196e1728b8f4e6c50dd686b5f874376",
+        "src/trace-mapping.ts": "340776f4d7e6737ccdd7e37a1ba823e3e64fa94f",
+        "src/types.ts": "6b54b242a4d2c6a2e40a5ce61f99346fd906bbf7",
+        "tsconfig.json": "ce6c613debd23e79243681ce8afa734c6693c0eb"
+      },
+      "labels": [
+        {
+          "id": "trace-mapping-01",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/binary-search.ts",
+            "text": "state.lastIndex = binarySearch(haystack, needle, low, high)",
+            "token": "binarySearch"
+          },
+          "target": {
+            "file": "src/binary-search.ts",
+            "text": "export function binarySearch(",
+            "token": "binarySearch"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "trace-mapping-02",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/sort.ts",
+            "text": "const unsortedIndex = nextUnsortedSegmentLine(mappings, 0)",
+            "token": "nextUnsortedSegmentLine"
+          },
+          "target": {
+            "file": "src/sort.ts",
+            "text": "function nextUnsortedSegmentLine(",
+            "token": "nextUnsortedSegmentLine"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "trace-mapping-03",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/sort.ts",
+            "text": "i = nextUnsortedSegmentLine(mappings, i + 1)",
+            "token": "nextUnsortedSegmentLine"
+          },
+          "target": {
+            "file": "src/sort.ts",
+            "text": "function nextUnsortedSegmentLine(",
+            "token": "nextUnsortedSegmentLine"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "trace-mapping-04",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/sort.ts",
+            "text": "mappings[i] = sortSegments(mappings[i], owned)",
+            "token": "sortSegments"
+          },
+          "target": {
+            "file": "src/sort.ts",
+            "text": "function sortSegments(",
+            "token": "sortSegments"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "trace-mapping-05",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/sort.ts",
+            "text": "if (!isSorted(mappings[i]))",
+            "token": "isSorted"
+          },
+          "target": {
+            "file": "src/sort.ts",
+            "text": "function isSorted(",
+            "token": "isSorted"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "trace-mapping-06",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/trace-mapping.ts",
+            "text": "cast(map)._encoded ??= encode(cast(map)._decoded!)",
+            "token": "cast"
+          },
+          "target": {
+            "file": "src/trace-mapping.ts",
+            "text": "function cast(map: unknown): PublicMap",
+            "token": "cast"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "trace-mapping-07",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/trace-mapping.ts",
+            "text": "const decoded = decodedMappings(map)",
+            "token": "decodedMappings",
+            "occurrence": 0
+          },
+          "target": {
+            "file": "src/trace-mapping.ts",
+            "text": "export function decodedMappings(map: TraceMap)",
+            "token": "decodedMappings"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "trace-mapping-08",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/trace-mapping.ts",
+            "text": "return clone(map, encodedMappings(map))",
+            "token": "clone"
+          },
+          "target": {
+            "file": "src/trace-mapping.ts",
+            "text": "function clone<",
+            "token": "clone"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "trace-mapping-09",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/trace-mapping.ts",
+            "text": "return clone(map, encodedMappings(map))",
+            "token": "encodedMappings"
+          },
+          "target": {
+            "file": "src/trace-mapping.ts",
+            "text": "export function encodedMappings(map: TraceMap)",
+            "token": "encodedMappings"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "trace-mapping-10",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/trace-mapping.ts",
+            "text": "this._decodedMemo = memoizedState()",
+            "token": "memoizedState"
+          },
+          "target": {
+            "file": "src/binary-search.ts",
+            "text": "export function memoizedState(): MemoState",
+            "token": "memoizedState"
+          },
+          "rationale": "Statically named local declaration, verified from the source and imports/receiver type."
+        },
+        {
+          "id": "trace-mapping-11",
+          "dispatch": "parameter",
+          "call": {
+            "file": "src/trace-mapping.ts",
+            "text": "cb({",
+            "token": "cb"
+          },
+          "target": null,
+          "rationale": "Parameter callback supplied by callers; no unique implementation is established by this source."
+        }
+      ],
+      "edit": {
+        "file": "src/binary-search.ts",
+        "old": "lastKey: -1,",
+        "new": "lastKey: -2,"
+      }
+    },
+    {
+      "id": "clsx",
+      "repository": "https://github.com/lukeed/clsx",
+      "revision": "925494cf31bcd97d3337aacd34e659e80cae7fe2",
+      "language": "javascript",
+      "files": {
+        "package.json": "69954cbf4d9694c5e995cdaa037ec4a82cb497c0",
+        "src/index.js": "c1f53ca795dd8c91c50622476143c4e232ece247",
+        "src/lite.js": "c1e9364bf53ebee62da4d0f233745ac69c325379"
+      },
+      "labels": [
+        {
+          "id": "clsx-01",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/index.js",
+            "text": "if (y = toVal(mix[k]))",
+            "token": "toVal"
+          },
+          "target": {
+            "file": "src/index.js",
+            "text": "function toVal(mix)",
+            "token": "toVal"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "clsx-02",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/index.js",
+            "text": "if (x = toVal(tmp))",
+            "token": "toVal"
+          },
+          "target": {
+            "file": "src/index.js",
+            "text": "function toVal(mix)",
+            "token": "toVal"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        }
+      ],
+      "edit": {
+        "file": "src/index.js",
+        "old": "str += mix;",
+        "new": "str += String(mix);"
+      }
+    },
+    {
+      "id": "mri",
+      "repository": "https://github.com/lukeed/mri",
+      "revision": "e73e9f9d5b02124d14ac17dac2c4801687d3e99a",
+      "language": "javascript",
+      "files": {
+        "package.json": "5a224b264d3af10e6cbb7bb8bff1bb9486d515b6",
+        "src/index.js": "1a233e5b1d1013e3a3369ad407818c860877c92c"
+      },
+      "labels": [
+        {
+          "id": "mri-01",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/index.js",
+            "text": "opts.string = toArr(opts.string)",
+            "token": "toArr"
+          },
+          "target": {
+            "file": "src/index.js",
+            "text": "function toArr(any)",
+            "token": "toArr"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "mri-02",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/index.js",
+            "text": "opts.boolean = toArr(opts.boolean)",
+            "token": "toArr"
+          },
+          "target": {
+            "file": "src/index.js",
+            "text": "function toArr(any)",
+            "token": "toArr"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "mri-03",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/index.js",
+            "text": "arr = opts.alias[k] = toArr(opts.alias[k])",
+            "token": "toArr"
+          },
+          "target": {
+            "file": "src/index.js",
+            "text": "function toArr(any)",
+            "token": "toArr"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "mri-04",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/index.js",
+            "text": "toVal(out, name, (idx + 1 < arr.length) || val, opts)",
+            "token": "toVal"
+          },
+          "target": {
+            "file": "src/index.js",
+            "text": "function toVal(out, key, val, opts)",
+            "token": "toVal"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "mri-05",
+          "dispatch": "parameter",
+          "call": {
+            "file": "src/index.js",
+            "text": "return opts.unknown(arg)",
+            "token": "unknown"
+          },
+          "target": null,
+          "rationale": "Callback/constructor supplied by an input value; its runtime implementation is not established by the source."
+        }
+      ],
+      "edit": {
+        "file": "src/index.js",
+        "old": "args = args || [];",
+        "new": "args = args || [].slice();"
+      }
+    },
+    {
+      "id": "klona",
+      "repository": "https://github.com/lukeed/klona",
+      "revision": "6ad153073b7529769010ddbde1938372e1702f5b",
+      "language": "javascript",
+      "files": {
+        "package.json": "6e9d1ebb771f2862f6a08260b81cef529817824d",
+        "src/full.js": "b5f86c39c7f1525fdb77e6b23bbcd0e1009c20e7",
+        "src/index.js": "4b866bad8df47466c1093ef53d231542b869ad2c",
+        "src/json.js": "eae543d57aac0620e291eee9ad4be4e3b31aee8f",
+        "src/lite.js": "bbd342ee0e37c6d65e84216768ca0254eeca2c7e"
+      },
+      "labels": [
+        {
+          "id": "klona-01",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/index.js",
+            "text": "tmp[k] = klona(x[k]);",
+            "token": "klona",
+            "occurrence": 0
+          },
+          "target": {
+            "file": "src/index.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-02",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/index.js",
+            "text": "tmp[k] = klona(x[k]);",
+            "token": "klona",
+            "occurrence": 1
+          },
+          "target": {
+            "file": "src/index.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-03",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/index.js",
+            "text": "tmp[k] = klona(x[k]);",
+            "token": "klona",
+            "occurrence": 2
+          },
+          "target": {
+            "file": "src/index.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-04",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/index.js",
+            "text": "value: klona(x[k]),",
+            "token": "klona"
+          },
+          "target": {
+            "file": "src/index.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-05",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/index.js",
+            "text": "tmp.add(klona(val));",
+            "token": "klona"
+          },
+          "target": {
+            "file": "src/index.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-06",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/index.js",
+            "text": "tmp.set(klona(key), klona(val));",
+            "token": "klona(key)"
+          },
+          "target": {
+            "file": "src/index.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-07",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/index.js",
+            "text": "tmp.set(klona(key), klona(val));",
+            "token": "klona(val)"
+          },
+          "target": {
+            "file": "src/index.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-08",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/index.js",
+            "text": "new x.constructor( klona(x.buffer) )",
+            "token": "klona"
+          },
+          "target": {
+            "file": "src/index.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-09",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/lite.js",
+            "text": "tmp[k] = klona(x[k]);",
+            "token": "klona",
+            "occurrence": 0
+          },
+          "target": {
+            "file": "src/lite.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-10",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/lite.js",
+            "text": "tmp[k] = klona(x[k]);",
+            "token": "klona",
+            "occurrence": 1
+          },
+          "target": {
+            "file": "src/lite.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-11",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/lite.js",
+            "text": "tmp[k] = klona(x[k]);",
+            "token": "klona",
+            "occurrence": 2
+          },
+          "target": {
+            "file": "src/lite.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-12",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/lite.js",
+            "text": "value: klona(x[k]),",
+            "token": "klona"
+          },
+          "target": {
+            "file": "src/lite.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-13",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/json.js",
+            "text": "klona(tmp) : tmp;",
+            "token": "klona",
+            "occurrence": 0
+          },
+          "target": {
+            "file": "src/json.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-14",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/json.js",
+            "text": "klona(tmp) : tmp;",
+            "token": "klona",
+            "occurrence": 1
+          },
+          "target": {
+            "file": "src/json.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-15",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/json.js",
+            "text": "value: klona(val[k]),",
+            "token": "klona"
+          },
+          "target": {
+            "file": "src/json.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-16",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/full.js",
+            "text": "if (typeof val.value === 'object') val.value = klona(val.value)",
+            "token": "klona"
+          },
+          "target": {
+            "file": "src/full.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-17",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/full.js",
+            "text": "tmp.add(klona(val));",
+            "token": "klona"
+          },
+          "target": {
+            "file": "src/full.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-18",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/full.js",
+            "text": "tmp.set(klona(key), klona(val));",
+            "token": "klona(key)"
+          },
+          "target": {
+            "file": "src/full.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-19",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/full.js",
+            "text": "tmp.set(klona(key), klona(val));",
+            "token": "klona(val)"
+          },
+          "target": {
+            "file": "src/full.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-20",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/full.js",
+            "text": "new x.constructor( klona(x.buffer) )",
+            "token": "klona"
+          },
+          "target": {
+            "file": "src/full.js",
+            "text": "export function klona(",
+            "token": "klona"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-21",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/full.js",
+            "text": "set(tmp, list[i], Object.getOwnPropertyDescriptor(x, list[i]));",
+            "token": "set"
+          },
+          "target": {
+            "file": "src/full.js",
+            "text": "function set(obj, key, val)",
+            "token": "set"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-22",
+          "dispatch": "direct",
+          "call": {
+            "file": "src/full.js",
+            "text": "set(tmp, k, Object.getOwnPropertyDescriptor(x, k));",
+            "token": "set"
+          },
+          "target": {
+            "file": "src/full.js",
+            "text": "function set(obj, key, val)",
+            "token": "set"
+          },
+          "rationale": "Named local helper/recursion, source-reviewed before running these JavaScript projects; body ownership does not imply a callback invocation edge."
+        },
+        {
+          "id": "klona-23",
+          "dispatch": "parameter",
+          "call": {
+            "file": "src/index.js",
+            "text": "tmp = new x.constructor();",
+            "token": "constructor"
+          },
+          "target": null,
+          "rationale": "Callback/constructor supplied by an input value; its runtime implementation is not established by the source."
+        }
+      ],
+      "edit": {
+        "file": "src/index.js",
+        "old": "if (typeof x !== 'object') return x;",
+        "new": "if (x == null || typeof x !== 'object') return x;"
+      }
+    }
+  ]
+}

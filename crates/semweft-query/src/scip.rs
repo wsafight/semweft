@@ -6,11 +6,21 @@ use semweft_core::*;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path, time::Instant};
 
+pub const ADAPTER_VERSION: &str = "scip-adapter@0.3-go-static-dispatch";
+
 pub fn source_manifest(snapshot: &Snapshot) -> Value {
-    json!({"schema_version":"0.1","workspace_id":snapshot.manifest.workspace_id,
+    let mut manifest = json!({"schema_version":"0.1","workspace_id":snapshot.manifest.workspace_id,
         "analysis_config":snapshot.manifest.analysis_versions.get("analysis_config"),
         "files":snapshot.manifest.files.iter().map(|(p,f)|(p.clone(),f.file_hash.clone())).collect::<BTreeMap<_,_>>(),
-        "binary_files":snapshot.manifest.binary_files})
+        "binary_files":snapshot.manifest.binary_files});
+    if let Some(environment) = snapshot
+        .manifest
+        .analysis_versions
+        .get("go_build_environment")
+    {
+        manifest["go_build_environment"] = json!(environment);
+    }
+    manifest
 }
 
 pub fn load(path: &Path) -> Result<(Index, String)> {
@@ -37,7 +47,25 @@ fn key(file: &str, symbol: &str) -> String {
     }
 }
 
-fn span(document: &Document, occurrence: &Occurrence, source: &LineIndex<'_>) -> Result<Span> {
+fn position_encoding(index: &Index, document: &Document) -> Option<PositionEncoding> {
+    if document.position_encoding.value() == 0
+        && index
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.tool_info.as_ref())
+            .is_some_and(|tool| tool.name == "scip-typescript" && tool.version == "0.6.0")
+    {
+        Some(PositionEncoding::UTF16CodeUnitOffsetFromLineStart)
+    } else {
+        document.position_encoding.enum_value().ok()
+    }
+}
+
+fn span(
+    occurrence: &Occurrence,
+    source: &LineIndex<'_>,
+    encoding: Option<PositionEncoding>,
+) -> Result<Span> {
     let range = match &occurrence.typed_range {
         Some(Typed_range::SingleLineRange(r)) => {
             vec![r.line, r.start_character, r.line, r.end_character]
@@ -55,7 +83,7 @@ fn span(document: &Document, occurrence: &Occurrence, source: &LineIndex<'_>) ->
     let point = |line: i32, column: i32| -> Result<Position> {
         let line = u32::try_from(line).context("negative SCIP line")?;
         let column = u32::try_from(column).context("negative SCIP column")?;
-        match document.position_encoding.enum_value().ok() {
+        match encoding {
             Some(PositionEncoding::UTF8CodeUnitOffsetFromLineStart) => {
                 let pos = Position {
                     line: line.checked_add(1).context("line overflow")?,
@@ -137,12 +165,22 @@ pub fn analyze(
                 document.relative_path
             );
         }
+        let encoding = position_encoding(index, document);
+        if document.position_encoding.value() == 0
+            && encoding == Some(PositionEncoding::UTF16CodeUnitOffsetFromLineStart)
+        {
+            gaps.push(Diagnostic {
+                code: "scip_position_encoding_compatibility".into(),
+                file: Some(document.relative_path.clone()),
+                message: "scip-typescript@0.6.0 omits document position_encoding; using its verified TypeScript UTF-16 range convention, not metadata text_document_encoding".into(),
+            });
+        }
         for occurrence in &document.occurrences {
             check_deadline(deadline)?;
             if occurrence.symbol.is_empty() {
                 continue;
             }
-            let span = match span(document, occurrence, &line_indices[&document.relative_path]) {
+            let span = match span(occurrence, &line_indices[&document.relative_path], encoding) {
                 Ok(span) => span,
                 Err(error) => {
                     gaps.push(Diagnostic {
@@ -230,7 +268,15 @@ pub fn analyze(
                         file: target.file.clone(),
                         span: target.name_span,
                         concrete_function: target.kind == "function",
-                        derivation: TargetDerivation::ScipBinding,
+                        derivation: if call.kind == CallKind::Method
+                            && call.file.ends_with(".go")
+                            && target.file.ends_with(".go")
+                            && target.kind == "function"
+                        {
+                            TargetDerivation::ScipGoStaticBinding
+                        } else {
+                            TargetDerivation::ScipBinding
+                        },
                     });
                 }
             }
@@ -353,4 +399,60 @@ fn check_deadline(deadline: Instant) -> Result<()> {
         bail!("timeout: SCIP import exceeded query deadline");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scip::types::{Metadata, ToolInfo};
+
+    #[test]
+    fn legacy_typescript_utf16_is_version_bound_and_preserves_explicit_encoding() {
+        let mut index = Index::new();
+        let mut tool = ToolInfo::new();
+        tool.name = "scip-typescript".into();
+        tool.version = "0.6.0".into();
+        let mut metadata = Metadata::new();
+        metadata.tool_info = Some(tool).into();
+        index.metadata = Some(metadata).into();
+        let mut document = Document::new();
+        let mut occurrence = Occurrence::new();
+        occurrence.range = vec![0, 3, 8];
+        let source = LineIndex::new("😀 stock()");
+        let mapped = span(&occurrence, &source, position_encoding(&index, &document)).unwrap();
+        assert_eq!(mapped.start, Position { line: 1, column: 6 });
+        assert_eq!(
+            mapped.end,
+            Position {
+                line: 1,
+                column: 11
+            }
+        );
+        document.position_encoding = PositionEncoding::UTF8CodeUnitOffsetFromLineStart.into();
+        occurrence.range = vec![0, 5, 10];
+        assert_eq!(
+            span(&occurrence, &source, position_encoding(&index, &document)).unwrap(),
+            mapped
+        );
+        document.position_encoding = protobuf::EnumOrUnknown::from_i32(0);
+        index
+            .metadata
+            .as_mut()
+            .unwrap()
+            .tool_info
+            .as_mut()
+            .unwrap()
+            .version = "unverified".into();
+        assert!(span(&occurrence, &source, position_encoding(&index, &document)).is_err());
+        index
+            .metadata
+            .as_mut()
+            .unwrap()
+            .tool_info
+            .as_mut()
+            .unwrap()
+            .version = "0.6.0".into();
+        document.position_encoding = protobuf::EnumOrUnknown::from_i32(99);
+        assert!(span(&occurrence, &source, position_encoding(&index, &document)).is_err());
+    }
 }

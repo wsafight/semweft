@@ -1,0 +1,14 @@
+semweft-evidence:
+  image: rust:1
+  variables:
+    GIT_DEPTH: "0"
+  script:
+    - cargo build --locked -p semweft-cli --release
+    - export SEMWEFT_BIN=target/release/semweft
+    - export SEMWEFT_DIFF="${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1}..${CI_COMMIT_SHA}"
+    - sh examples/ci/semweft-ci.sh
+  artifacts:
+    when: always
+    expire_in: 14 days
+    paths:
+      - semweft-reports/

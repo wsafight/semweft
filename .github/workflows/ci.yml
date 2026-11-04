@@ -24,6 +24,34 @@ jobs:
       - run: cargo test --locked --workspace
       - run: cargo test --locked --workspace --all-features
 
+  stability:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Repeat concurrent startup, watcher and revocation regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for iteration in {1..10}; do
+            echo "Stability iteration $iteration"
+            cargo test --locked -p semweft-cli --all-features --test mvp stability:: -- --test-threads=4
+            cargo test --locked -p semweft-cli --all-features --test mvp p0::revoking_go_trust_cancels_the_running_producer_promptly
+            cargo test --locked -p semweft-cli --all-features --test mvp p0::watcher_detects_changes_in_external_go_workspace_members
+            cargo test --locked -p semweft-store private_directory
+            cargo test --locked -p semweft-query --all-features --lib process::tests
+          done 2>&1 | tee "$RUNNER_TEMP/stability.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stability-${{ matrix.os }}
+          path: ${{ runner.temp }}/stability.log
+
   desktop-macos:
     runs-on: macos-latest
     steps:
@@ -45,3 +73,82 @@ jobs:
           components: rust-analyzer, rust-src
       - run: cargo test --locked -p semweft-cli --test cli lsp_refresh_matches_cold_with_annotated_targets -- --ignored --nocapture
       - run: cargo test --locked -p semweft-cli --test mvp trusted_daemon_publishes_l3_and_refreshes_references -- --ignored --nocapture
+
+  semantic-producers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.2'
+          cache: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.5.0'
+      - name: Install pinned real SCIP producers outside the workspace
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/scip-bin"
+          GOBIN="$RUNNER_TEMP/scip-bin" go install github.com/scip-code/scip-go/cmd/scip-go@v0.2.9
+          npm install --prefix "$RUNNER_TEMP/scip-tools" --ignore-scripts --no-audit --no-fund @sourcegraph/scip-typescript@0.6.0 typescript@5.9.3
+          echo "SEMWEFT_SCIP_GO=$RUNNER_TEMP/scip-bin/scip-go" >> "$GITHUB_ENV"
+          echo "SEMWEFT_SCIP_TYPESCRIPT=$RUNNER_TEMP/scip-tools/node_modules/.bin/scip-typescript" >> "$GITHUB_ENV"
+      - name: Check real SCIP producers, source-bound LCOV, edits and cold consistency
+        shell: bash
+        run: |
+          "$SEMWEFT_SCIP_GO" --version
+          "$SEMWEFT_SCIP_TYPESCRIPT" --version
+          cargo test --locked -p semweft-cli --all-features --test mvp producers:: -- --ignored --nocapture | tee "$RUNNER_TEMP/semantic-producers.log"
+      - name: Fetch pinned source-reviewed real repository corpus
+        run: python3 examples/language-acceptance/fetch.py --destination "$RUNNER_TEMP/language-corpus"
+      - name: Measure annotated calls, parsing and refresh consistency
+        shell: bash
+        env:
+          SEMWEFT_ACCEPTANCE_ROOT: ${{ runner.temp }}/language-corpus
+          SEMWEFT_ACCEPTANCE_REPORT: ${{ runner.temp }}/language-acceptance.json
+        run: cargo test --release --locked -p semweft-cli --all-features --test mvp acceptance::source_annotated_go_and_typescript_repositories -- --ignored --nocapture | tee "$RUNNER_TEMP/language-acceptance.log"
+      - name: Measure real CLI watchers through body, rename and build edits
+        shell: bash
+        env:
+          SEMWEFT_ACCEPTANCE_ROOT: ${{ runner.temp }}/language-corpus
+          SEMWEFT_WATCH_ACCEPTANCE_REPORT: ${{ runner.temp }}/language-watch-acceptance.json
+        run: cargo test --release --locked -p semweft-cli --all-features --test mvp acceptance::repository_watchers_match_cold_after_body_rename_and_build_changes -- --ignored --nocapture | tee "$RUNNER_TEMP/language-watch-acceptance.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semantic-producers
+          path: |
+            ${{ runner.temp }}/semantic-producers.log
+            ${{ runner.temp }}/language-acceptance.log
+            ${{ runner.temp }}/language-acceptance.json
+            ${{ runner.temp }}/language-watch-acceptance.log
+            ${{ runner.temp }}/language-watch-acceptance.json
+
+  hook-hosts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.5.0'
+      - name: Install pinned hosts outside the workspace
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/hook-hosts" --ignore-scripts --no-audit --no-fund @openai/codex@0.166.0 @anthropic-ai/claude-code@2.1.108
+          echo "SEMWEFT_CODEX=$RUNNER_TEMP/hook-hosts/node_modules/.bin/codex" >> "$GITHUB_ENV"
+          echo "SEMWEFT_CLAUDE=$RUNNER_TEMP/hook-hosts/node_modules/.bin/claude" >> "$GITHUB_ENV"
+      - name: Check real host hooks against local scripted models
+        shell: bash
+        run: |
+          "$SEMWEFT_CODEX" --version
+          "$SEMWEFT_CLAUDE" --version
+          cargo test --locked -p semweft-cli --all-features --test mvp hosts:: -- --ignored --nocapture | tee "$RUNNER_TEMP/hook-hosts.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hook-hosts
+          path: ${{ runner.temp }}/hook-hosts.log

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use tree_sitter::{Node, Parser, Tree};
 
 pub const PARSER_VERSION: &str =
-    "tree-sitter-typescript@0.23;tree-sitter-javascript@0.25;extractor@0.1";
+    "tree-sitter-typescript@0.23;tree-sitter-javascript@0.25;extractor@0.3-anonymous-owners";
 pub fn is_source(path: &str) -> bool {
     [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"]
         .iter()
@@ -130,12 +130,54 @@ fn extract(
             .or_default()
             .push(text(source, file).trim_matches(['\'', '"']).into());
     }
+    if n.kind() == "call_expression"
+        && let Some(function) = n.child_by_field_name("function")
+        && matches!(text(function, file), "import" | "require")
+    {
+        let argument = n
+            .child_by_field_name("arguments")
+            .and_then(|arguments| arguments.named_child(0));
+        if let Some(argument) = argument.filter(|argument| argument.kind() == "string") {
+            facts
+                .imports
+                .entry(path.into())
+                .or_default()
+                .push(text(argument, file).trim_matches(['\'', '"']).into());
+        } else {
+            facts.diagnostics.push(Diagnostic {code:"dynamic_module_specifier".into(),file:Some(path.into()),
+                message:format!("Module specifier at line {} is not a string literal; runtime resolution is unknown",n.start_position().row + 1)});
+        }
+    }
     let value = n.child_by_field_name("value");
+    let anonymous_callable = matches!(
+        n.kind(),
+        "arrow_function" | "function_expression" | "generator_function"
+    ) && !n
+        .parent()
+        .is_some_and(|parent| parent.kind() == "variable_declarator");
+    let default_export = anonymous_callable
+        .then(|| n.parent())
+        .flatten()
+        .filter(|parent| parent.kind() == "export_statement");
+    let synthetic_name = if let Some(export) = default_export {
+        (0..export.child_count())
+            .filter_map(|index| export.child(index))
+            .find(|child| child.kind() == "default")
+    } else if anonymous_callable {
+        (0..n.child_count())
+            .filter_map(|index| n.child(index))
+            .find(|child| matches!(child.kind(), "function" | "=>"))
+    } else {
+        None
+    };
     let kind = match n.kind() {
         "function_declaration" | "generator_function_declaration" | "function_signature" => {
             Some("function")
         }
         "method_definition" | "method_signature" | "abstract_method_signature" => Some("function"),
+        "arrow_function" | "function_expression" | "generator_function" if anonymous_callable => {
+            Some("function")
+        }
         "class_declaration" | "abstract_class_declaration" => Some("struct"),
         "interface_declaration" => Some("trait"),
         "type_alias_declaration" => Some("type"),
@@ -156,16 +198,28 @@ fn extract(
     };
     let mut nested = scope.to_vec();
     let mut caller = owner.map(str::to_owned);
-    if let (Some(kind), Some(name)) = (kind, n.child_by_field_name("name")) {
+    if let (Some(kind), Some(name)) = (kind, n.child_by_field_name("name").or(synthetic_name)) {
         // Destructuring does not declare a single symbol with the pattern as its name.
-        if matches!(
-            name.kind(),
-            "identifier"
-                | "type_identifier"
-                | "property_identifier"
-                | "private_property_identifier"
-        ) {
-            let name_text = text(name, file).to_owned();
+        if synthetic_name.is_some()
+            || matches!(
+                name.kind(),
+                "identifier"
+                    | "type_identifier"
+                    | "property_identifier"
+                    | "private_property_identifier"
+            )
+        {
+            let name_text = if default_export.is_some() {
+                "default".into()
+            } else if anonymous_callable && n.child_by_field_name("name").is_none() {
+                format!(
+                    "<anonymous@{}:{}>",
+                    n.start_position().row + 1,
+                    n.start_position().column + 1
+                )
+            } else {
+                text(name, file).to_owned()
+            };
             nested.push(name_text.clone());
             let qualified = format!("{path}::{}", nested.join("::"));
             let id = identity("sym", &[&qualified, kind, &name.start_byte().to_string()]);
@@ -183,7 +237,7 @@ fn extract(
                 kind: kind.into(),
                 file: path.into(),
                 file_hash: file.file_hash.clone(),
-                span: span(n),
+                span: span(default_export.unwrap_or(n)),
                 name_span: span(name),
                 signature,
             });
@@ -228,18 +282,11 @@ fn extract(
             caller = Some(id);
         }
     }
-    if matches!(
-        n.kind(),
-        "arrow_function" | "function_expression" | "generator_function"
-    ) && !n
-        .parent()
-        .is_some_and(|p| p.kind() == "variable_declarator")
-    {
-        caller = None;
+    if anonymous_callable && default_export.is_none() {
         facts.diagnostics.push(Diagnostic {
-            code: "closure_owner_not_modeled".into(),
+            code: "callback_invocation_not_modeled".into(),
             file: Some(path.into()),
-            message: format!("anonymous callback at line {}", n.start_position().row + 1),
+            message: format!("Function body has its own declaration at line {}; callback invocation and dynamic flow are not inferred", n.start_position().row + 1),
         });
     }
     if matches!(n.kind(), "call_expression" | "new_expression")
@@ -338,6 +385,68 @@ fn extract(
 mod tests {
     use super::*;
     #[test]
+    fn anonymous_exports_and_callbacks_keep_separate_function_owners() {
+        let source = "/** parse arguments */\nexport default function (args) {\n  direct(args);\n  args.forEach(value => inner(value));\n  args.map(function (value) { return mapped(value); });\n  return args;\n}\nfunction direct(value) { return value; }\nfunction inner(value) { return value; }\nfunction mapped(value) { return value; }\n";
+        let manifest = Manifest {
+            workspace_id: "anonymous-owners".into(),
+            files: BTreeMap::from([("src/index.js".into(), SourceFile::new(source))]),
+            binary_files: BTreeMap::new(),
+            analysis_versions: BTreeMap::new(),
+            scope: "test".into(),
+        };
+        let facts = WebParser::new().unwrap().analyze(&manifest).unwrap();
+        let exported = facts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "default")
+            .unwrap();
+        assert_eq!(facts.declarations[&exported.symbol_id].visibility, "public");
+        assert_eq!(
+            facts.declarations[&exported.symbol_id].docs,
+            "parse arguments"
+        );
+        assert!(exported.span.contains(exported.name_span.start));
+        let direct = facts
+            .calls
+            .iter()
+            .find(|call| call.expression == "direct")
+            .unwrap();
+        assert_eq!(
+            direct.caller_id.as_deref(),
+            Some(exported.symbol_id.as_str())
+        );
+        let mut owners = std::collections::BTreeSet::new();
+        for expression in ["inner", "mapped"] {
+            let call = facts
+                .calls
+                .iter()
+                .find(|call| call.expression == expression)
+                .unwrap();
+            let owner = facts
+                .symbols
+                .iter()
+                .find(|symbol| Some(&symbol.symbol_id) == call.caller_id.as_ref())
+                .unwrap();
+            assert!(owner.name.starts_with("<anonymous@"));
+            assert!(owner.span.contains(call.span.start));
+            assert!(owner.span.contains(owner.name_span.start));
+            assert_ne!(owner.symbol_id, exported.symbol_id);
+            owners.insert(owner.symbol_id.as_str());
+        }
+        assert_eq!(owners.len(), 2);
+        assert_eq!(
+            facts
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "callback_invocation_not_modeled")
+                .count(),
+            2
+        );
+        let mut coordinator = RefreshCoordinator::default();
+        coordinator.publish_inputs(manifest, facts).unwrap();
+    }
+
+    #[test]
     fn captures_tsx_js_and_typescript_candidates_without_running_the_project() {
         let manifest = Manifest {
             workspace_id: "web".into(),
@@ -383,7 +492,7 @@ mod tests {
             facts
                 .diagnostics
                 .iter()
-                .any(|d| d.code == "closure_owner_not_modeled")
+                .any(|d| d.code == "callback_invocation_not_modeled")
         );
         let test = facts.symbols.iter().find(|s| s.name == "send").unwrap();
         assert!(facts.declarations[&test.symbol_id].test_only);

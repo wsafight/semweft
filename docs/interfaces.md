@@ -18,17 +18,20 @@ Agent 通过 MCP 调用 Semweft。事实查询工具返回结构化 JSON，统�
 |get_symbol|签名、文档、位置和可选函数体|v0.1|
 |find_references|声明范围内引用，按来源、确定性和类型分组|v0.1|
 |call_graph|受深度、节点数和时间预算约束的调用关系|v0.1|
-|impact_of|符号或 diff 的候选影响和证据路径；风险评分后续增加|v0.1|
+|impact_of|符号或 diff 的候选影响和证据路径；diff 模式提供实验性启发式风险分数|v0.1|
 |context_pack|按符号或候选任务目标和 Token 预算打包上下文|v0.1|
 |verify_change|按已实现规则核验；列出 findings 和证据不足|v0.2|
 |find_paths|受限制的调用路径，显式报告截断|v0.2|
+|suggest_tests|根据符号或 diff 的反向调用/引用路径推荐显式 Rust 测试入口，不执行测试|v0.2|
 |find_implementations|trait 或 trait 方法的已索引实现，标注测试作用域与外部实现缺口|v0.2|
 |get_review_result|按 review_id 拉取绑定快照、版本对和 diff 哈希的人工审查记录|v0.3|
 |arch_check|已实现架构规则检查|v0.3|
+|agent_preflight|显式文件/符号修改前的候选影响、公开声明和保护检查|增量|
+|agent_verify|双侧 diff 修改后的内置核验、已配置架构与保护规则|增量|
 |contract_impact|已建模 IDL 变更的代码影响；发布建议后续增加|v0.4|
 |query|结构化高级图查询，语法待定|后续|
 
-上表同时列出已接入与未来规划。当前注册 11 个只读工具：v0.1 的 10 个工具加 `find_implementations`。本次 v0.2 增量只接入 `find_implementations` / `impls`，`verify_change`、`find_paths` 及其他未来工具尚未接入；不能根据“首个版本”列推断整版能力已交付。
+上表同时列出已接入与未来规划。当前注册 19 个只读工具：原有 14 个加 `arch_check`、`agent_preflight`、`agent_verify`、`get_review_result` 与 `contract_impact`。新增工具契约见 [护栏与审查指南](guardrails.md)和 [契约分析](contracts.md)；高级 query 等仍未接入，不能据版本列推断整版交付。
 
 ### 1.1 响应示例
 
@@ -114,7 +117,7 @@ Agent 通过 MCP 调用 Semweft。事实查询工具返回结构化 JSON，统�
 }
 ```
 
-**字段说明**：direct_callers 为直接调用方数，transitive_callers 包含直接调用方，是当前模型内的可达集合，二者按调用方符号去重。relation_count 按 relation_id 统计关系（边），同一调用方可经多条边到达，因此与调用方数不同；evidence_count 统计证据条数，一条关系可有多条证据。source 分布按证据计数（各项之和为 evidence_count），certainty、freshness、runtime 按关系计数（各项之和为 relation_count），关系级取值规则见[核心概念与证据模型](evidence-model.md)第 2.1 节。path 按从该关系到目标的顺序列出 relation_id，构成证据路径。示例按分页返回前 2 条，其余用 next_cursor 续查。服务映射在 v0.4 起提供；测试候选和风险评分在 v0.2 起逐项适配，未提供的字段返回 null 并在能力清单说明。null 不表示数量为零。
+**字段说明**：direct_callers 为直接调用方数，transitive_callers 包含直接调用方，是当前模型内的可达集合，二者按调用方符号去重。relation_count 按 relation_id 统计关系（边），同一调用方可经多条边到达，因此与调用方数不同；evidence_count 统计证据条数，一条关系可有多条证据。source 分布按证据计数（各项之和为 evidence_count），certainty、freshness、runtime 按关系计数（各项之和为 relation_count），关系级取值规则见[核心概念与证据模型](evidence-model.md)第 2.1 节。path 按从该关系到目标的顺序列出 relation_id，构成证据路径。示例按分页返回前 2 条，其余用 next_cursor 续查。显式服务映射、测试候选和启发式风险评分已接入，具体字段和未覆盖范围见下文；未提供的输入或能力返回 null 并在能力清单说明，null 不表示数量为零。
 
 示例的两条证据都支持 inventory::Stock::deduct，L1 的 candidate 表示较弱的支持，不反驳 L3 的 definite，因此关系可为 definite。互不兼容的目标绑定才按证据模型中的冲突规则处理。
 
@@ -164,9 +167,63 @@ evidence_summary.basis 说明统计覆盖的范围：complete 表示结果集已
 |find_implementations|symbol（Rust trait 或 trait_method）|path_prefix（工作区根）、source（全部）、certainty（全部）、freshness（current、pending）及事实查询通用参数|target、trait、mode、implementation_counts、inherited_defaults、excluded_candidates、relations（含 implementation），见下文|同 get_symbol；其他目标 kind 为 invalid_argument；不支持历史证据扩展|
 |call_graph|symbol|direction（callers，另有 callees、both）、depth（3，上限 10）、max_nodes（1,000）|nodes、relations、frontier|depth_limit、node_limit 截断见 1.2 节|
 |impact_of|symbol 或 diff，二选一|diff 取 base、head（选择器见 1.4 节）、depth（3）、max_nodes（1,000）|summary、changes、snapshots（diff 模式）、relations 与证据路径|两者都传或都不传为 invalid_argument；base 侧无语义索引时降级并列入 known_gaps|
+|verify_change|diff（或续页 cursor）|depth（3，上限 10）、max_nodes（1,000，上限 100,000）、require_fresh、fresh_wait_ms、timeout_ms、limit、cursor|diff 影响证据、verification、findings，详见下文|diff 选择器错误或与顶层 snapshot_id / semantic_epoch 混用为 invalid_argument；不接受 symbol、关系过滤或自定义 rules|
+|find_paths|from、to（或续页 cursor）|max_depth（5，上限 10）、max_paths（100，上限 1,000）、max_nodes（1,000，上限 100,000）、path_prefix 及关系过滤/事实查询通用参数|from、to、paths、path_summary、frontier；逐路径内嵌完整关系证据|符号未找到或歧义同 get_symbol；深度、路径、节点和时间截断显式返回|
+|suggest_tests|symbol 或 diff 二选一（或续页 cursor）|depth（3，上限 10）、max_nodes（1,000，上限 100,000）、path_prefix 及关系过滤/事实查询通用参数|原始影响证据、test_candidates、test_summary|diff 不能混用顶层快照参数；候选不等于覆盖率，不执行测试|
 |context_pack|budget，以及 symbol 或 task 二选一|tokenizer（使用工作区配置，默认 estimated）、include（定义、调用方签名、被调方签名、相关类型、测试、配置）|items（粒度为 full、signature、outline 或 location）、token_count、omitted|budget 低于 min_budget 返回 budget_too_small；v0.1 的 task 只按符号名和路径匹配|
 
 实现补充：关系查询支持 `path_prefix`（CLI `--path`），按引用、调用或实现发生位置过滤。`repo_map` 包含空源文件模块、`core_symbols`（按不同入边符号数排序）、`omitted_core_symbols` 与 `analysis_health`；`max_symbols_per_module=0` 表示返回所有模块内符号，人工格式默认采用此值，Agent 默认仍为 20。
+
+`search_symbols` 支持 `visibility=public/restricted/private/all`，`query="*"` 列出匹配声明。默认 api_scope=declarations 保留语法过滤；api_scope=external 从捕获 Rust 库入口展开模块、本地重导出、公开类型成员，返回候选导出路径和逐步证据。CLI `search --visibility public` 或 `--api-scope external` 省略 query 时自动使用 `*`；支持 `--kind`、`--path` 和固定分页。external 不能混用 private/restricted。diff 新增全量 api_surface_summary 与分页 api_changes，即使仅重导出变化也可返回；不判定兼容性。详见[公开 API](public-api.md)。
+
+`repo_map dependencies=service`（CLI map --dependencies service）按快照冻结的 services 配置聚合索引依赖，可与 cycles 合用；`find_paths scope=symbol/module/service` 默认 symbol，另外两种使用源文件/显式服务端点。聚合路径每跳保留调用见证，不保证拼成同一执行链。diff 返回 affected_services 与 service_impact_summary。配置、重叠拒绝与语义边界见[服务映射](services.md)。
+
+#### Diff 报告增强（v0.2 增量）
+
+impact_of、verify_change、suggest_tests 的 diff 模式共用增强字段。`diff_summary` 返回分页前 changed_symbols、change_kinds、configuration_changes、residual_references、affected_modules_observed、module_aggregation_complete、external_api_candidate_path_changes 和 analysis_basis。`affected_modules[]` 按 side/path 聚合源文件模块，返回 crate、固定 snapshot_id/semantic_epoch、changed_symbol_ids、affected_symbol_ids、relation_ids、residual_reference_count，以及已映射时的 service；它汇集变更符号、影响图、关系增减和残留名称位置，同一文件在两侧分别计数。列表位于原始关系列表之后分页，另有 affected_services 聚合显式服务归属。当前不把内联模块拆成独立依赖节点；module_aggregation_complete 只表示对已计算证据的聚合完成，不表示外部或未遍历模块已穷尽。
+
+`risk_summary` 提供 0–100 的 `heuristic_v2` 审查优先级分数、low/moderate/high/critical 等级、置信度和逐维分数。总分为影响范围（最多 20）、公开声明变化（最多 20）、已索引调用者与深度（最多 15）、导入行覆盖（最多 15）、Git 历史热点（最多 15）、证据缺口（最多 15）之和；缺少实际改动时 `score` 为 null。它不是概率，也未通过标注任务校准。`risk_inputs` 可分别提供 base/head artifact，对应 CLI `--base-risk-inputs` / `--risk-inputs`；结构、生成、校验和公式见[风险输入指南](risk-inputs.md)。缺少或部分输入返回 unavailable/partial 并增加不确定性分，不当成零覆盖或零热点。覆盖范围是变更声明的已报告可执行行，不是精确 diff 行或逐测试归因，Semweft 不执行测试。`sources` 返回输入内容摘要和覆盖/历史来源，导入数据不提升静态关系的 certainty。公开声明按语法可见性计数，不推断外部可达性、兼容性或所有消费者。所有摘要在分页前固定，续页不重新读取文件、Git 或外部报告。模型版本变化使旧模型的审查批准失效。
+
+relation_changes.added/removed 分别显式标 side=head/base；residual_references 标 side=head 并保留 coordinate_snapshot_id。受限 diff 的 suggested 参数保留过滤和两侧固定版本，扩大预算后不会自动切到新工作区输入。
+
+#### suggest_tests：测试候选推荐（v0.2 增量）
+
+`symbol` 模式复用 impact_of 的反向遍历；`diff` 模式固定 base/head 后合并两侧影响路径。只识别直接标注 `#[test]`、`#[tokio::test(...)]` 或 `#[async_std::test(...)]` 的 Rust 函数；测试模块、测试目录中的辅助函数不能仅因处于测试作用域而成为候选。选中或修改的测试自身可产生零边 selected_test 证据；其他候选须有到目标的完整调用/引用路径。截断缺失中间边时省略该 witness 并披露缺口。
+
+`test_candidates[]` 含 test（符号、签名、位置）、test_snapshot（固定版本对）、availability（head/base_only）、ignored、detection、certainty=candidate、executed=false 和 witnesses。每个 witness 含 side、target_symbol_id、reason（selected_test/call_path/reference_path）、按测试到目标排列的完整 path；非空路径另有 path_certainty。路径绑定 definite 不能提升候选为已覆盖测试。base 测试若在 head 有唯一同限定名同 kind 的支持入口则映射到 head，否则保留 base_only；这属于名称匹配，不证明跨版本语义身份。
+
+`test_summary` 为分页前计数：candidate_count、head_candidates、base_only_candidates、ignored_candidates（两侧候选合计）、head_nonignored_candidates。summary.tests_to_run 仅等于当前版本非 ignored 的候选数，不表示这些测试可以构建或执行。coverage 固定 unavailable、executed 固定 false。traversal_complete 仅表示受限索引遍历及 witness 提取是否完成；known_gaps 始终保留无逐测试覆盖和入口识别范围，因此 completeness 为 partial，零候选不能推出无需测试。
+
+候选按 head 优先、限定名和符号 ID 稳定排序、去重；分页先输出完整候选（内嵌 witnesses 不拆分），再输出原始影响关系和关系增减。limit 计数包含这些列表项。每页重复 test_summary 和固定版本，续页只需 cursor；扩大遍历预算时 suggested 参数保留原过滤和固定单侧/双侧版本。
+
+CLI `tests <symbol>` 或 `tests --suggested --diff <selector>` 映射到 suggest_tests；`--suggested` 为兼容显式推荐模式的可选标记。支持与 impact 一致的 `--path`、`--depth`、`--max-nodes`、关系过滤和通用参数，`tests --cursor <next_cursor>` 继续分页。
+
+#### find_paths：符号间受限调用路径（v0.2 增量）
+
+默认 `scope=symbol` 时，`from` 和 `to` 接受已索引符号 ID 或可唯一解析的名称，沿调用方向查询 `kind=call`。`scope=module` 使用源文件路径，`scope=service` 使用显式配置的服务名称，聚合规则和逐跳见证见[服务映射](services.md)；聚合依赖路径不保证是连续的函数执行链。相同端点返回一条零边路径；其他结果为不重复节点的简单路径，环不会无限展开。同一对符号的不同调用点按 relation_id 区分，可形成不同路径。按稳定顺序深度优先枚举，不保证最短路径优先。
+
+`paths[]` 包含 path_id、symbol_ids、symbols（位置及签名）、length、certainty、freshness 和按调用顺序排列的 relations。每条关系保留来源与 evidence、位置和 file_hash；来源过滤后重算关系确定性，路径只在所有边 definite 时为 definite。任一 pending 边使路径为 pending。零边路径为符号自身的恒等路径。path_id 绑定快照、语义 epoch、端点和边序列。
+
+`path_summary` 的 path_count、visited_nodes、枚举限制和 enumeration_complete 为分页前计算结果，随页重复。enumeration_complete=true 仅表示已索引图的简单路径枚举完成，不覆盖 completeness 中的语义绑定和外部消费者缺口。max_depth / max_paths / max_nodes 分别产生 depth_limit / path_limit / node_limit；恰好返回 max_paths 条且没有更多路径时不报告 path_limit。超时且已有路径时返回部分结果，尚无路径时返回 timeout 错误；取消返回 cancelled。frontier 是未展开边界，不是续算游标；扩大预算通过 output.continuation.suggested 固定版本重新查询。
+
+`limit` 以完整路径为单位分页，路径中的边不会拆开。output.returned_paths 为本页路径数；remaining_paths 仅在枚举完成时给出后续页路径数，否则为 null。returned_relations 为本页路径中的不同 relation_id 数，remaining_relations 为尚未输出路径中的不同关系数（枚举未完成时为 null）；共享边可以出现在多条路径或不同页中，不能累加页计数推断全图边数。evidence_summary 按分页前全部已找到路径的不同关系统计；分析期间仅用于探索但未进入结果路径的边不计入。游标固定完整视图和参数，继续请求只需 cursor。
+
+#### verify_change：内置规则修改核验（v0.2 增量）
+
+首页必须显式提供 `diff.base` / `diff.head`；选择器和双侧版本绑定遵循 1.4 节，续页只需 `cursor`。核验复用 `impact_of` 的两侧符号、关系、残留引用、配置变化与缺口，保留统一响应 envelope 和 `snapshots`。
+
+|字段|含义|
+|---|---|
+|verification.status|全量结果的 `violations_found` / `insufficient_evidence` / `no_violations_found`，按此优先级汇总|
+|verification.rules|所有已运行内置规则的 id、version、status、finding_count|
+|verification.not_run|未运行的规则；首版固定运行全部四条内置规则，此列表为空|
+|verification.finding_count / violation_count / warning_count|分页前的全量计数；每页重复，不能按当前页重新推断状态|
+|verification.scope|原始 diff 请求、depth、max_nodes、外部消费者边界与未执行编译/测试等限制|
+|findings[]|rule_id、rule_version、severity、status、message、evidence；evidence 保留相关配置文件、完整性缺口或原始引用/关系（含 side、location、relation_id 和来源证据）|
+
+四条内置规则版本均为 `0.1`：`configuration_change_requires_review`、`impact_analysis_incomplete`、`residual_reference_requires_review`、`candidate_impact_requires_review`，触发条件见[功能规格](features.md) D 节。首版仅生成 warning / insufficient_evidence，不产生确定违规。语义绑定为 definite 也只表明该关系的目标绑定，不证明其调用方必须修改。当前索引披露 L1 绑定缺口，因此通常返回 insufficient_evidence；编译、测试、签名兼容、自定义规则和架构策略不在首版核验范围内。
+
+分页顺序为 `findings`、`relations`、`relation_changes.added`、`relation_changes.removed`，共用 limit。其余 diff 元数据及完整核验结论随页重复；分页造成的 `page_limit` 不反向改变核验状态，分析阶段的深度/节点/时间限制会产生证据不足 finding。续页固定两侧快照及首页参数；改变 limit 等参数为 invalid_argument，跨工具使用游标为 cursor_expired。CLI `verify` 根据完整 verification.status 返回 0/1/3；MCP 的证据不足作为成功的工具结果返回，不属于协议错误。
 
 #### find_implementations：Rust trait 实现查询（v0.2 增量）
 
@@ -279,6 +336,8 @@ flowchart LR
 
 MCP 的 diff 为 { base, head }，两侧都必填。每侧选择器只能取一种形式：{ "kind": "revision", "revision": "HEAD" } 或 { "kind": "snapshot", "snapshot_id": "snap_demo" }；head 还允许 { "kind": "workspace" }。snapshot 选择器可另带 semantic_epoch 固定已发布视图。base 不允许 workspace；diff 模式不能再传顶层 snapshot_id 或 semantic_epoch，避免重复指定。
 
+历史语义视图可按相同源码重用。`snapshots[side].commit` 是请求的提交上下文，`analysis_commit` 是原分析视图的提交，二者不应混淆。两者不同时，固定重查的 snapshot 选择器另带 `commit_context`，同时保留原 snapshot_id/semantic_epoch；服务器解析该提交并验证捕获文件与所选快照完全相同，不允许把任意提交标签贴到不同源码上。该字段仅用于 snapshot，不能和 revision/workspace 选择器混用。正常分页不重新读取 Git。
+
 CLI 使用以下统一语法，impact 的 diff 模式以及 verify、tests、review、contract check 共用，均须显式传 --diff：
 
 |参数|base|head|
@@ -349,10 +408,19 @@ semweft impls inventory::Deduct --path crates/inventory
 semweft impls inventory::Deduct::deduct --source L3 --certainty candidate
 semweft impls inventory::Deduct --freshness current --limit 1 --format json
 
-# v0.2 规划：限定规则、测试候选和受限路径，尚未在本次接入
-semweft verify --diff WORKTREE --rules api-signature  # 对比两侧并核验声明规则
-semweft tests --suggested --diff HEAD~1..HEAD
+# v0.2 增量：四条内置审查规则
+semweft verify --diff WORKTREE --format markdown
+semweft verify --diff HEAD~1..HEAD --limit 1 --format json
+semweft verify --cursor <next_cursor>
 semweft path create_order deduct --max-depth 5 --max-paths 100
+semweft path --cursor <next_cursor>
+
+# v0.2 增量：显式 Rust 测试候选，不执行测试
+semweft tests --suggested --diff HEAD~1..HEAD
+semweft tests inventory::Stock::deduct --depth 5 --format markdown
+semweft tests --cursor <next_cursor>
+
+# v0.2 规划：自定义/兼容性规则、公开 API 与循环依赖
 semweft search --visibility public --path crates/inventory   # 公开 API 清单
 semweft map --dependencies module --cycles            # 循环依赖检测
 
@@ -360,7 +428,7 @@ semweft map --dependencies module --cycles            # 循环依赖检测
 semweft review --diff origin/main...HEAD --format json --open
 semweft review --id <review-id> --open
 semweft report --diff origin/main...HEAD --html impact.html  # 自包含静态报告
-semweft report --html map.html                        # 结构与依赖报告
+semweft report --input review.json --format html > review.html # 自包含固定报告
 semweft arch check --baseline
 
 # v0.4：契约兼容性与已建模使用点
@@ -373,7 +441,7 @@ semweft query 'MATCH (f:Function)-[:CALLS*1..3]->(g {name:"exec_sql"}) RETURN f'
 semweft tui
 ```
 
-核心 CLI 与 MCP 对应：map → repo_map、search → search_symbols、symbol-at → symbol_at、symbol → get_symbol、refs → find_references、impls → find_implementations、calls → call_graph、impact → impact_of、context → context_pack、capabilities → capabilities、status → index_status。规划中的 search --visibility 对应 search_symbols 的 visibility 参数，map --cycles 对应 repo_map 的 cycles 参数；report 为规划中的 CLI 渲染器，组合 repo_map 与 impact_of 的固定视图，不对应独立 MCP 工具。calls 的 --direction 默认 callers，可选 callees、both。事实查询命令共用 --snapshot-id、--semantic-epoch、--require-fresh、--fresh-wait-ms、--limit、--cursor、--timeout-ms 与 --format；关系工具另提供 --path、--source、--certainty、--freshness。impls 的必填位置参数为 trait 或 trait 方法，--path 映射为 path_prefix，完整计数和两类元数据的分页约定见 1.3 节。refs 的历史请求使用 `--include-stale --stale-from <snapshot_id> --stale-semantic-epoch <epoch>`，对应 1.3 节。JSON 使用相同响应结构，diff 版本绑定按 1.4 节处理。
+核心 CLI 与 MCP 对应：map → repo_map、search → search_symbols、symbol-at → symbol_at、symbol → get_symbol、refs → find_references、impls → find_implementations、calls → call_graph、path → find_paths、impact → impact_of、verify → verify_change、tests → suggest_tests、context → context_pack、capabilities → capabilities、status → index_status；新增 arch-check → arch_check、guard before/after → agent_preflight/agent_verify、review get → get_review_result、contract-impact → contract_impact。search --visibility 和 map --cycles 已接入。report --input 离线渲染 JSON/Markdown/SARIF/HTML，不对应 MCP；review save、写架构基线和 hook 回执是显式本地写操作。calls --direction 默认为 callers，path 以 --max-depth/--max-paths/--max-nodes 限制枚举。事实查询共用快照、epoch、新鲜度等待、limit/cursor、timeout 与 format；diff 拒绝顶层快照参数。verify 不接受关系过滤；其他关系查询的 path/source/certainty/freshness、impls 元数据与 refs 历史参数继续遵循 1.3 节。新增工具与参数的精确约束以 capabilities schema 及专题指南为准。
 
 工作区选择使用 --workspace，配置文件选择使用 --config，查找与优先级见[架构设计](architecture.md)第 1.2 节。v0.1 semweft mcp 仅提供 stdio，无本地 HTTP 监听选项。
 
@@ -436,7 +504,7 @@ RETURN f.qualified_name, n ORDER BY n DESC
 
 - **IDE 插件**：VS Code 和 Zed 中显示影响范围、调用方数量、热点标记、架构违规提示（P2）
 
-- **CI 集成**：GitHub Actions、GitLab CI 模板；PR 评论自动贴 impact Markdown 报告（按 --max-chars 裁剪），v0.3 起可附 HTML 报告作为构建产物；输出 SARIF 接入代码扫描（P1）。CI 路径不依赖任何 Agent 或模型
+- **CI 集成**：已提供 GitHub Actions、GitLab CI 模板、核验 JSON/Markdown/SARIF 工件和可选 SARIF 上传；PR 评论自动贴 impact Markdown 报告（按 --max-chars 裁剪）及 HTML 报告仍待接入。CI 路径不依赖任何 Agent 或模型
 
 - **本地 Streamable HTTP MCP**：后续按客户端需求评估，v0.1 仅 stdio；它仍使用 MCP 协议，连接本机索引服务，传输要求见质量文档的“本地传输”
 

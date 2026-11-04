@@ -17,7 +17,7 @@ pub struct DaemonRequest {
     #[serde(default)]
     pub request_id: Option<String>,
 }
-pub const TOOL_NAMES: [&str; 11] = [
+pub const TOOL_NAMES: [&str; 19] = [
     "capabilities",
     "index_status",
     "repo_map",
@@ -29,6 +29,14 @@ pub const TOOL_NAMES: [&str; 11] = [
     "impact_of",
     "context_pack",
     "find_implementations",
+    "verify_change",
+    "find_paths",
+    "suggest_tests",
+    "arch_check",
+    "agent_preflight",
+    "agent_verify",
+    "get_review_result",
+    "contract_impact",
 ];
 pub const MIN_BUDGET: u64 = 4096;
 
@@ -77,6 +85,7 @@ pub fn error_value(error: &anyhow::Error) -> Value {
         "trust_required",
         "index_refresh_failed",
         "index_store_error",
+        "review_not_found",
     ]
     .contains(&candidate)
     {
@@ -122,23 +131,36 @@ pub fn tool_schema(name: &str) -> Value {
         }
     }
     match name {
+        "get_review_result" => {
+            required.push("review_id");
+            props.insert("review_id".into(), string());
+        }
         "repo_map" => {
+            props.insert("cycles".into(), json!({"type":"boolean","default":false}));
             props.extend(Map::from_iter([
                 ("path_prefix".into(), string()),
                 ("depth".into(), integer(2, 0, 10)),
                 ("max_symbols_per_module".into(), integer(20, 0, 1000)),
                 (
                     "dependencies".into(),
-                    choice(&["crate", "module", "none"], "crate"),
+                    choice(&["crate", "module", "service", "none"], "crate"),
                 ),
             ]));
         }
         "search_symbols" => {
             required.push("query");
+            props.insert(
+                "api_scope".into(),
+                choice(&["declarations", "external"], "declarations"),
+            );
             props.extend(Map::from_iter([
                 ("query".into(), string()),
                 ("kind".into(), string()),
                 ("path_prefix".into(), string()),
+                (
+                    "visibility".into(),
+                    choice(&["public", "restricted", "private", "all"], "all"),
+                ),
                 (
                     "match".into(),
                     choice(&["fuzzy", "exact", "prefix"], "fuzzy"),
@@ -189,12 +211,52 @@ pub fn tool_schema(name: &str) -> Value {
                 ),
             ]));
         }
-        "call_graph" | "impact_of" => {
+        "arch_check" => {
+            let strings = json!({"type":"array","items":string()});
+            let layer = object(
+                json!({"name":string(),"paths":strings,"allow":strings}),
+                &["name", "paths"],
+            );
+            props.insert("policy".into(), object(json!({"layers":{"type":"array","items":layer},"deny_unassigned":{"type":"boolean"}}), &["layers"]));
+            props.insert("baseline".into(), object(json!({"schema_version":string(),"rules_digest":string(),"fingerprints":strings,"snapshot_id":string(),"semantic_epoch":integer(0,0,u64::MAX)}), &["schema_version","rules_digest","fingerprints","snapshot_id","semantic_epoch"]));
+            let selector = object(
+                json!({"kind":choice(&["revision","snapshot","workspace"],"workspace"),"revision":string(),"snapshot_id":string(),"semantic_epoch":integer(0,0,u64::MAX),"commit_context":string()}),
+                &["kind"],
+            );
+            props.insert(
+                "diff".into(),
+                object(json!({"base":selector,"head":selector}), &["base", "head"]),
+            );
+        }
+        "agent_preflight" => {
+            let strings = json!({"type":"array","items":string()});
+            props.insert("files".into(), strings.clone());
+            props.insert("symbols".into(), strings);
+            props.insert("depth".into(), integer(3, 1, 10));
+            props.insert("max_nodes".into(), integer(1000, 1, 100000));
+        }
+        "call_graph" | "impact_of" | "verify_change" | "suggest_tests" | "agent_verify"
+        | "contract_impact" => {
             props.extend(Map::from_iter([
-                ("symbol".into(), string()),
                 ("depth".into(), integer(3, 1, 10)),
                 ("max_nodes".into(), integer(1000, 1, 100000)),
             ]));
+            if !matches!(name, "verify_change" | "agent_verify" | "contract_impact") {
+                props.insert("symbol".into(), string());
+            } else {
+                required.push("diff");
+            }
+            if name == "agent_verify" {
+                let architecture = tool_schema("arch_check");
+                props.insert(
+                    "baseline".into(),
+                    architecture["properties"]["baseline"].clone(),
+                );
+                props.insert(
+                    "policy".into(),
+                    architecture["properties"]["policy"].clone(),
+                );
+            }
             if name == "call_graph" {
                 required.push("symbol");
                 props.insert(
@@ -203,7 +265,7 @@ pub fn tool_schema(name: &str) -> Value {
                 );
             } else {
                 let selector = object(
-                    json!({"kind":choice(&["revision","snapshot","workspace"],"workspace"),"revision":string(),"snapshot_id":string(),"semantic_epoch":integer(0,0,u64::MAX)}),
+                    json!({"kind":choice(&["revision","snapshot","workspace"],"workspace"),"revision":string(),"snapshot_id":string(),"semantic_epoch":integer(0,0,u64::MAX),"commit_context":string()}),
                     &["kind"],
                 );
                 props.insert(
@@ -211,6 +273,20 @@ pub fn tool_schema(name: &str) -> Value {
                     object(json!({"base":selector,"head":selector}), &["base", "head"]),
                 );
             }
+        }
+        "find_paths" => {
+            required.extend(["from", "to"]);
+            props.insert(
+                "scope".into(),
+                choice(&["symbol", "module", "service"], "symbol"),
+            );
+            props.extend(Map::from_iter([
+                ("from".into(), string()),
+                ("to".into(), string()),
+                ("max_depth".into(), integer(5, 1, 10)),
+                ("max_paths".into(), integer(100, 1, 1000)),
+                ("max_nodes".into(), integer(1000, 1, 100000)),
+            ]));
         }
         "context_pack" => {
             required.push("budget");
@@ -234,6 +310,56 @@ pub fn tool_schema(name: &str) -> Value {
         }
         _ => {}
     }
+    if matches!(
+        name,
+        "impact_of"
+            | "verify_change"
+            | "suggest_tests"
+            | "agent_verify"
+            | "arch_check"
+            | "contract_impact"
+            | "agent_preflight"
+    ) {
+        let line = object(
+            json!({"line":integer(1,1,u32::MAX as u64),"hits":integer(0,0,u64::MAX)}),
+            &["line", "hits"],
+        );
+        let file = object(
+            json!({"path":string(),"file_hash":string(),"lines":{"type":"array","items":line},"history_changes":integer(0,0,1000)}),
+            &["path", "file_hash"],
+        );
+        let coverage = object(
+            json!({"format":choice(&["lcov"],"lcov"),"report_digest":string(),"source_manifest_digest":string(),"omitted_records":integer(0,0,u32::MAX as u64)}),
+            &[
+                "format",
+                "report_digest",
+                "source_manifest_digest",
+                "omitted_records",
+            ],
+        );
+        let history = object(
+            json!({"anchor_commit":string(),"commits_observed":integer(0,0,1000),"limit":integer(100,1,1000),"window_limited":{"type":"boolean"},"shallow":{"type":"boolean"}}),
+            &[
+                "anchor_commit",
+                "commits_observed",
+                "limit",
+                "window_limited",
+                "shallow",
+            ],
+        );
+        let artifact = object(
+            json!({"schema_version":choice(&["0.1"],"0.1"),"workspace_id":string(),"files":{"type":"array","items":file},"coverage":coverage,"history":history}),
+            &["schema_version", "workspace_id", "files"],
+        );
+        props.insert(
+            "risk_inputs".into(),
+            if name == "agent_preflight" {
+                object(json!({"head":artifact}), &["head"])
+            } else {
+                object(json!({"base":artifact,"head":artifact}), &[])
+            },
+        );
+    }
     if name == "find_implementations" {
         required.push("symbol");
         props.insert("symbol".into(), string());
@@ -243,6 +369,8 @@ pub fn tool_schema(name: &str) -> Value {
         "call_graph",
         "impact_of",
         "find_implementations",
+        "find_paths",
+        "suggest_tests",
     ]
     .contains(&name)
     {
@@ -274,6 +402,14 @@ pub fn tools() -> Vec<Value> {
         "Candidate impact of a symbol or explicit diff",
         "Context with a serialized-response budget",
         "Indexed implementations of a trait or trait method",
+        "Verify an explicit diff with versioned built-in review rules and evidence gaps",
+        "Bounded simple call paths between indexed symbols, with evidence and explicit truncation",
+        "Suggested declared Rust tests from bounded impact paths, with snapshot evidence and coverage gaps",
+        "Check versioned file-layer dependency rules and classify new findings against a diff or explicit baseline",
+        "Before-edit public declaration, candidate impact and protected-region guardrails for explicit files or symbols",
+        "After-edit diff, configured architecture and protected-region verification using captured base and head policies",
+        "Load an immutable local human review and check its snapshot and rule bindings against the selected analysis view",
+        "Protobuf field/RPC diff, selected compatibility rules and configured generated-code candidate impacts",
     ];
     TOOL_NAMES.iter().zip(descriptions).map(|(name,description)|json!({"name":name,"description":description,"version":"0.1","input_schema":tool_schema(name)})).collect()
 }
@@ -345,6 +481,26 @@ pub fn validate(tool: &str, args: &Value) -> Result<()> {
     if cursor {
         return Ok(());
     }
+    if args.get("risk_inputs").is_some()
+        && ((tool != "agent_preflight" && args.get("diff").is_none())
+            || args["risk_inputs"].as_object().is_none_or(Map::is_empty))
+    {
+        bail!(
+            "invalid_argument: risk inputs require a diff or preflight and at least one side artifact"
+        );
+    }
+    if args["cycles"] == true && args["dependencies"] == "none" {
+        bail!("invalid_argument: cycles require crate or module dependencies");
+    }
+    if args["api_scope"] == "external"
+        && args["visibility"]
+            .as_str()
+            .is_some_and(|visibility| !["public", "all"].contains(&visibility))
+    {
+        bail!(
+            "invalid_argument: external API inventory cannot filter private or restricted declarations"
+        );
+    }
     for key in schema["anyOf"][1]["required"]
         .as_array()
         .into_iter()
@@ -368,16 +524,33 @@ pub fn validate(tool: &str, args: &Value) -> Result<()> {
     {
         bail!("invalid_argument: fresh_wait_ms cannot exceed half of timeout_ms");
     }
-    if tool == "impact_of" {
-        if args.get("symbol").is_some() == args.get("diff").is_some() {
-            bail!("invalid_argument: exactly one of symbol and diff is required");
-        }
-        if args.get("diff").is_some()
-            && (args.get("snapshot_id").is_some() || args.get("semantic_epoch").is_some())
-        {
+    if matches!(tool, "impact_of" | "suggest_tests")
+        && args.get("symbol").is_some() == args.get("diff").is_some()
+    {
+        bail!("invalid_argument: exactly one of symbol and diff is required");
+    }
+    if let Some(diff) = args.get("diff") {
+        if args.get("snapshot_id").is_some() || args.get("semantic_epoch").is_some() {
             bail!(
                 "invalid_argument: diff selectors cannot be combined with top-level snapshot parameters"
             );
+        }
+        for side in ["base", "head"] {
+            let selector = &diff[side];
+            let keys = selector.as_object().unwrap();
+            let valid = match selector["kind"].as_str() {
+                Some("revision") => keys.len() == 2 && keys.contains_key("revision"),
+                Some("snapshot") => {
+                    keys.contains_key("snapshot_id")
+                        && keys.len() <= 4
+                        && !keys.contains_key("revision")
+                }
+                Some("workspace") => side == "head" && keys.len() == 1,
+                _ => false,
+            };
+            if !valid {
+                bail!("invalid_argument: invalid diff {side} selector");
+            }
         }
     }
     if tool == "context_pack" && (args.get("symbol").is_some() == args.get("task").is_some()) {
@@ -414,7 +587,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_registry_exposes_implementations_without_verify_change() {
+    fn risk_inputs_are_structured_and_bound_to_diff_or_preflight() {
+        let artifact = json!({"schema_version":"0.1","workspace_id":"ws_risk","files":[{"path":"src/lib.rs","file_hash":"a".repeat(64),"lines":[{"line":1,"hits":0}]}],
+            "coverage":{"format":"lcov","report_digest":"b".repeat(64),"source_manifest_digest":"c".repeat(64),"omitted_records":0}});
+        let diff =
+            json!({"base":{"kind":"revision","revision":"HEAD"},"head":{"kind":"workspace"}});
+        for tool in [
+            "impact_of",
+            "verify_change",
+            "suggest_tests",
+            "agent_verify",
+            "arch_check",
+            "contract_impact",
+        ] {
+            validate(tool, &json!({"diff":diff,"risk_inputs":{"head":artifact}})).unwrap();
+        }
+        assert!(
+            validate(
+                "impact_of",
+                &json!({"symbol":"entry","risk_inputs":{"head":artifact}})
+            )
+            .is_err()
+        );
+        assert!(validate("impact_of", &json!({"diff":diff,"risk_inputs":{}})).is_err());
+        validate(
+            "agent_preflight",
+            &json!({"files":["src/lib.rs"],"risk_inputs":{"head":artifact}}),
+        )
+        .unwrap();
+        assert!(
+            validate(
+                "agent_preflight",
+                &json!({"files":["src/lib.rs"],"risk_inputs":{"base":artifact}})
+            )
+            .is_err()
+        );
+        let mut invalid = artifact;
+        invalid["files"][0]["lines"][0]["line"] = json!(0);
+        assert!(
+            validate(
+                "impact_of",
+                &json!({"diff":diff,"risk_inputs":{"head":invalid}})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn tool_registry_exposes_implementations_and_change_verification() {
         let expected = [
             "capabilities",
             "index_status",
@@ -427,21 +647,120 @@ mod tests {
             "impact_of",
             "context_pack",
             "find_implementations",
+            "verify_change",
+            "find_paths",
+            "suggest_tests",
+            "arch_check",
+            "agent_preflight",
+            "agent_verify",
+            "get_review_result",
+            "contract_impact",
         ];
         assert_eq!(TOOL_NAMES, expected);
         let registered = tools();
-        assert_eq!(registered.len(), 11);
+        assert_eq!(registered.len(), 19);
         for (tool, name) in registered.iter().zip(expected) {
             assert_eq!(tool["name"], name);
             assert_eq!(tool["version"], "0.1");
             assert!(!tool["description"].as_str().unwrap().is_empty());
             assert_eq!(tool["input_schema"], tool_schema(name));
         }
-        let error = validate("verify_change", &json!({})).unwrap_err();
-        assert_eq!(
-            error_value(&error)["error"]["code"],
-            "capability_unsupported"
-        );
+    }
+
+    #[test]
+    fn test_suggestions_accept_one_target_mode_and_reject_invalid_combinations() {
+        let diff =
+            json!({"base":{"kind":"revision","revision":"HEAD"},"head":{"kind":"workspace"}});
+        for args in [
+            json!({"symbol":"stock"}),
+            json!({"diff":diff}),
+            json!({"symbol":"stock","source":["L1"],"path_prefix":"src","depth":10,"max_nodes":100000}),
+            json!({"cursor":"page"}),
+        ] {
+            validate("suggest_tests", &args).unwrap();
+        }
+        for args in [
+            json!({}),
+            json!({"symbol":""}),
+            json!({"symbol":"stock","diff":diff}),
+            json!({"diff":diff,"snapshot_id":"head"}),
+            json!({"symbol":"stock","depth":0}),
+            json!({"symbol":"stock","source":["L4"]}),
+        ] {
+            let error = validate("suggest_tests", &args).unwrap_err();
+            assert_eq!(
+                error_value(&error)["error"]["code"],
+                "invalid_argument",
+                "{args}"
+            );
+        }
+    }
+
+    #[test]
+    fn paths_require_two_symbols_or_a_cursor_and_bounded_limits() {
+        let schema = tool_schema("find_paths");
+        assert_eq!(schema["anyOf"][1]["required"], json!(["from", "to"]));
+        for args in [
+            json!({"from":"entry","to":"stock"}),
+            json!({"from":"entry","to":"stock","max_depth":10,"max_paths":1000,"max_nodes":100000,
+                "source":["L1"],"certainty":["candidate"],"freshness":["current"],"path_prefix":"src"}),
+            json!({"cursor":"next"}),
+        ] {
+            validate("find_paths", &args).unwrap();
+        }
+        for args in [
+            json!({}),
+            json!({"from":"entry"}),
+            json!({"to":"stock"}),
+            json!({"from":"","to":"stock"}),
+            json!({"from":"entry","to":"stock","max_depth":0}),
+            json!({"from":"entry","to":"stock","max_depth":11}),
+            json!({"from":"entry","to":"stock","max_paths":0}),
+            json!({"from":"entry","to":"stock","max_paths":1001}),
+            json!({"from":"entry","to":"stock","max_nodes":0}),
+            json!({"from":"entry","to":"stock","path_prefix":"../src"}),
+            json!({"from":"entry","to":"stock","freshness":["stale"]}),
+        ] {
+            let error = validate("find_paths", &args).unwrap_err();
+            assert_eq!(
+                error_value(&error)["error"]["code"],
+                "invalid_argument",
+                "{args}"
+            );
+        }
+    }
+
+    #[test]
+    fn verification_requires_a_diff_or_cursor_and_validates_both_selectors() {
+        let schema = tool_schema("verify_change");
+        assert_eq!(schema["anyOf"][1]["required"], json!(["diff"]));
+        assert!(schema["properties"].get("symbol").is_none());
+        let diff =
+            json!({"base":{"kind":"revision","revision":"HEAD"},"head":{"kind":"workspace"}});
+        validate("verify_change", &json!({"diff":diff})).unwrap();
+        validate("verify_change", &json!({"cursor":"page"})).unwrap();
+        validate("verify_change", &json!({"diff":{"base":{"kind":"snapshot","snapshot_id":"base","semantic_epoch":0},"head":{"kind":"snapshot","snapshot_id":"head"}}})).unwrap();
+        for args in [
+            json!({}),
+            json!({"symbol":"stock"}),
+            json!({"diff":diff,"snapshot_id":"head"}),
+            json!({"diff":diff,"semantic_epoch":0}),
+            json!({"diff":diff,"rules":["unknown"]}),
+            json!({"diff":diff,"depth":0}),
+            json!({"diff":diff,"max_nodes":0}),
+            json!({"diff":{"base":{"kind":"workspace"},"head":{"kind":"workspace"}}}),
+            json!({"diff":{"base":{"kind":"revision"},"head":{"kind":"workspace"}}}),
+            json!({"diff":{"base":{"kind":"snapshot","semantic_epoch":0},"head":{"kind":"workspace"}}}),
+            json!({"diff":{"base":{"kind":"revision","revision":"HEAD","snapshot_id":"base"},"head":{"kind":"workspace"}}}),
+            json!({"diff":{"base":{"kind":"revision","revision":"HEAD"},"head":{"kind":"workspace","revision":"HEAD"}}}),
+        ] {
+            let error = validate("verify_change", &args).unwrap_err();
+            assert_eq!(
+                error_value(&error)["error"]["code"],
+                "invalid_argument",
+                "{args}"
+            );
+        }
     }
 
     #[test]

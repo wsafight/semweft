@@ -1,9 +1,11 @@
 use semweft_query::{config, dependencies, engine, frontend, git, lsp, query, web, workspace};
 mod benchmark;
 mod daemon;
+mod hooks;
 mod mcp;
 mod prototype;
 mod render;
+mod reports;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -40,6 +42,12 @@ struct Cli {
     limit: Option<u64>,
     #[arg(long, global = true)]
     cursor: Option<String>,
+    #[arg(long, global = true, conflicts_with = "cursor")]
+    all_pages: bool,
+    #[arg(long, global = true, conflicts_with = "cursor")]
+    risk_inputs: Option<PathBuf>,
+    #[arg(long, global = true, conflicts_with = "cursor")]
+    base_risk_inputs: Option<PathBuf>,
     #[arg(long, global = true, value_delimiter = ',')]
     source: Vec<String>,
     #[arg(long, global = true, value_delimiter = ',')]
@@ -53,6 +61,15 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Freeze source-bound LCOV observations and/or a read-only Git history window.
+    RiskInputs {
+        #[arg(long, requires = "source_manifest")]
+        coverage: Option<PathBuf>,
+        #[arg(long, requires = "coverage")]
+        source_manifest: Option<PathBuf>,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1000))]
+        history_commits: Option<u32>,
+    },
     /// Measure real captured inputs in a temporary index, without editing the workspace.
     BenchmarkStorage {
         #[arg(long, value_parser=clap::value_parser!(u32).range(1..=1000))]
@@ -77,6 +94,44 @@ enum Command {
     },
     /// Installed tools and limits; does not index or execute a build.
     Capabilities,
+    /// Analyze Protobuf changes and explicitly mapped generated-code consumers.
+    ContractImpact {
+        #[arg(long)]
+        diff: Option<String>,
+        #[arg(long)]
+        depth: Option<u64>,
+        #[arg(long)]
+        max_nodes: Option<u64>,
+    },
+    /// Save or retrieve a local human review bound to immutable analysis evidence.
+    Review {
+        #[command(subcommand)]
+        command: ReviewCommand,
+    },
+    /// Adapt an explicit Claude Code or Codex hook JSON event from stdin.
+    Hook {
+        #[arg(long,value_parser=["claude","codex"])]
+        host: String,
+    },
+    /// Before/after-edit agent guardrails; no build or test execution.
+    Guard {
+        #[command(subcommand)]
+        command: GuardCommand,
+    },
+    /// Check layer dependency directions and optionally compare or save a baseline.
+    ArchCheck {
+        #[arg(long)]
+        diff: Option<String>,
+        #[arg(long)]
+        baseline: Option<PathBuf>,
+        #[arg(long, conflicts_with = "cursor")]
+        write_baseline: Option<PathBuf>,
+    },
+    /// Render a saved verification JSON response without indexing the workspace.
+    Report {
+        #[arg(long)]
+        input: PathBuf,
+    },
     /// Write initial configuration without overwriting existing files.
     Init {
         #[arg(long)]
@@ -112,13 +167,15 @@ enum Command {
     Status,
     Doctor,
     Map {
+        #[arg(long)]
+        cycles: bool,
         #[arg(long, alias = "path-prefix")]
         path: Option<String>,
         #[arg(long)]
         depth: Option<u64>,
         #[arg(long)]
         max_symbols_per_module: Option<u64>,
-        #[arg(long,value_parser=["crate","module","none"])]
+        #[arg(long,value_parser=["crate","module","service","none"])]
         dependencies: Option<String>,
     },
     Search {
@@ -129,6 +186,10 @@ enum Command {
         path: Option<String>,
         #[arg(long="match",value_parser=["fuzzy","exact","prefix"])]
         match_mode: Option<String>,
+        #[arg(long,value_parser=["public","restricted","private","all"])]
+        visibility: Option<String>,
+        #[arg(long,value_parser=["declarations","external"])]
+        api_scope: Option<String>,
     },
     Symbol {
         symbol: Option<String>,
@@ -172,10 +233,48 @@ enum Command {
         #[arg(long)]
         max_nodes: Option<u64>,
     },
+    /// Bounded simple call paths between two indexed symbols.
+    Path {
+        from: Option<String>,
+        to: Option<String>,
+        #[arg(long,value_parser=["symbol","module","service"])]
+        scope: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        max_depth: Option<u64>,
+        #[arg(long)]
+        max_paths: Option<u64>,
+        #[arg(long)]
+        max_nodes: Option<u64>,
+    },
     Impact {
         symbol: Option<String>,
         #[arg(long)]
         path: Option<String>,
+        #[arg(long)]
+        diff: Option<String>,
+        #[arg(long)]
+        depth: Option<u64>,
+        #[arg(long)]
+        max_nodes: Option<u64>,
+    },
+    /// Recommend test candidates from indexed impact paths without executing tests.
+    Tests {
+        symbol: Option<String>,
+        #[arg(long)]
+        suggested: bool,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        diff: Option<String>,
+        #[arg(long)]
+        depth: Option<u64>,
+        #[arg(long)]
+        max_nodes: Option<u64>,
+    },
+    /// Verify an explicit diff using the installed built-in review rules.
+    Verify {
         #[arg(long)]
         diff: Option<String>,
         #[arg(long)]
@@ -287,7 +386,108 @@ enum SnapshotCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum GuardCommand {
+    Before {
+        #[arg(long = "file")]
+        files: Vec<String>,
+        #[arg(long = "symbol")]
+        symbols: Vec<String>,
+        #[arg(long)]
+        depth: Option<u64>,
+        #[arg(long)]
+        max_nodes: Option<u64>,
+    },
+    After {
+        #[arg(long)]
+        diff: Option<String>,
+        #[arg(long)]
+        baseline: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReviewCommand {
+    Save {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long,value_parser=["approve","reject","comment"])]
+        conclusion: String,
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    Get {
+        review_id: String,
+    },
+}
+
 async fn run(cli: &Cli) -> Result<Option<Value>> {
+    if (cli.risk_inputs.is_some() || cli.base_risk_inputs.is_some())
+        && !matches!(
+            cli.command,
+            Command::Impact { .. }
+                | Command::Verify { .. }
+                | Command::Tests { .. }
+                | Command::Guard { .. }
+                | Command::ArchCheck { .. }
+                | Command::ContractImpact { .. }
+        )
+    {
+        bail!("invalid_argument: risk inputs require a diff report or preflight command");
+    }
+    if let Command::Hook { host } = &cli.command {
+        use std::io::Read;
+        if cli
+            .format
+            .is_some_and(|format| !matches!(format, Format::Json))
+        {
+            bail!("invalid_argument: hook output must be JSON");
+        }
+        let payload: Value = serde_json::from_reader(std::io::stdin().lock().take(1_048_576))
+            .context("invalid_argument: invalid hook JSON")?;
+        return Ok(Some(hooks::run(
+            &payload,
+            host,
+            cli.workspace.as_deref(),
+            cli.config.as_deref(),
+        )?));
+    }
+    if cli.all_pages
+        && !matches!(
+            cli.command,
+            Command::Verify { .. }
+                | Command::Tests { .. }
+                | Command::Impact { .. }
+                | Command::ArchCheck { .. }
+                | Command::Guard { .. }
+                | Command::Map { .. }
+                | Command::Search { .. }
+                | Command::Calls { .. }
+                | Command::Path { .. }
+                | Command::Refs { .. }
+                | Command::Impls { .. }
+                | Command::ContractImpact { .. }
+        )
+    {
+        bail!("invalid_argument: all-pages requires a paginated fact or verification query");
+    }
+    if let Command::Report { input } = &cli.command {
+        let mut report = reports::load(input)?;
+        if matches!(cli.format, Some(Format::Sarif)) {
+            reports::set_source_root(
+                &mut report,
+                cli.workspace
+                    .as_deref()
+                    .unwrap_or(std::path::Path::new(".")),
+            )?;
+        }
+        return Ok(Some(report));
+    }
+    if matches!(cli.format, Some(Format::Sarif))
+        && !matches!(cli.command, Command::Verify { .. } | Command::Report { .. })
+    {
+        bail!("invalid_argument: SARIF is supported for verify and saved verification reports");
+    }
     if let Command::Prototype { command } = &cli.command {
         let root = cli.workspace.clone().unwrap_or_else(|| ".".into());
         return Ok(Some(match command {
@@ -352,6 +552,36 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
     }
     let resolved = config::resolve(cli.workspace.as_deref(), cli.config.as_deref())?;
     match &cli.command {
+        Command::RiskInputs {
+            coverage,
+            source_manifest,
+            history_commits,
+        } => {
+            let coverage = coverage.as_deref().zip(source_manifest.as_deref());
+            let artifact = semweft_query::risk_inputs::collect(
+                &resolved,
+                coverage,
+                *history_commits,
+                std::time::Instant::now()
+                    + std::time::Duration::from_millis(cli.timeout_ms.unwrap_or(60000)),
+            )?;
+            return Ok(Some(serde_json::to_value(artifact)?));
+        }
+        Command::Review {
+            command:
+                ReviewCommand::Save {
+                    input,
+                    conclusion,
+                    note,
+                },
+        } => {
+            return Ok(Some(semweft_query::reviews::save(
+                &resolved,
+                reports::load(input)?,
+                conclusion,
+                note,
+            )?));
+        }
         Command::Daemon => {
             daemon::serve(resolved)?;
             return Ok(None);
@@ -459,9 +689,64 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
     }
     let mut args = common(cli, matches!(cli.command, Command::Status));
     let tool = match &cli.command {
+        Command::ContractImpact {
+            diff,
+            depth,
+            max_nodes,
+        } => {
+            if let Some(diff) = diff {
+                args["diff"] = git::diff_selectors(&resolved.root, diff)?;
+            }
+            put(&mut args, "depth", *depth);
+            put(&mut args, "max_nodes", *max_nodes);
+            "contract_impact"
+        }
+        Command::Review {
+            command: ReviewCommand::Get { review_id },
+        } => {
+            args["review_id"] = json!(review_id);
+            "get_review_result"
+        }
+        Command::Guard { command } => match command {
+            GuardCommand::Before {
+                files,
+                symbols,
+                depth,
+                max_nodes,
+            } => {
+                if !files.is_empty() {
+                    args["files"] = json!(files);
+                }
+                if !symbols.is_empty() {
+                    args["symbols"] = json!(symbols);
+                }
+                put(&mut args, "depth", *depth);
+                put(&mut args, "max_nodes", *max_nodes);
+                "agent_preflight"
+            }
+            GuardCommand::After { diff, baseline } => {
+                if let Some(diff) = diff {
+                    args["diff"] = git::diff_selectors(&resolved.root, diff)?;
+                }
+                if let Some(path) = baseline {
+                    args["baseline"] = serde_json::from_slice(&std::fs::read(path)?)?;
+                }
+                "agent_verify"
+            }
+        },
+        Command::ArchCheck { diff, baseline, .. } => {
+            if let Some(diff) = diff {
+                args["diff"] = git::diff_selectors(&resolved.root, diff)?;
+            }
+            if let Some(path) = baseline {
+                args["baseline"] = serde_json::from_slice(&std::fs::read(path)?)?;
+            }
+            "arch_check"
+        }
         Command::Status => "index_status",
         Command::Doctor => "repo_map",
         Command::Map {
+            cycles,
             path,
             depth,
             max_symbols_per_module,
@@ -471,6 +756,9 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             put(&mut args, "depth", *depth);
             put(&mut args, "max_symbols_per_module", *max_symbols_per_module);
             put(&mut args, "dependencies", dependencies.as_ref());
+            if *cycles {
+                args["cycles"] = json!(true);
+            }
             if cli
                 .format
                 .is_some_and(|f| matches!(f, Format::Text | Format::Markdown))
@@ -489,11 +777,18 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             kind,
             path,
             match_mode,
+            visibility,
+            api_scope,
         } => {
             put(&mut args, "query", query.as_ref());
+            if query.is_none() && (visibility.is_some() || api_scope.is_some()) {
+                args["query"] = json!("*");
+            }
             put(&mut args, "kind", kind.as_ref());
             put(&mut args, "path_prefix", path.as_ref());
             put(&mut args, "match", match_mode.as_ref());
+            put(&mut args, "visibility", visibility.as_ref());
+            put(&mut args, "api_scope", api_scope.as_ref());
             "search_symbols"
         }
         Command::Symbol {
@@ -578,6 +873,24 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             put(&mut args, "max_nodes", *max_nodes);
             "call_graph"
         }
+        Command::Path {
+            from,
+            to,
+            scope,
+            path,
+            max_depth,
+            max_paths,
+            max_nodes,
+        } => {
+            put(&mut args, "from", from.as_ref());
+            put(&mut args, "to", to.as_ref());
+            put(&mut args, "scope", scope.as_ref());
+            put(&mut args, "path_prefix", path.as_ref());
+            put(&mut args, "max_depth", *max_depth);
+            put(&mut args, "max_paths", *max_paths);
+            put(&mut args, "max_nodes", *max_nodes);
+            "find_paths"
+        }
         Command::Impact {
             symbol,
             path,
@@ -593,6 +906,35 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             put(&mut args, "depth", *depth);
             put(&mut args, "max_nodes", *max_nodes);
             "impact_of"
+        }
+        Command::Verify {
+            diff,
+            depth,
+            max_nodes,
+        } => {
+            if let Some(diff) = diff {
+                args["diff"] = git::diff_selectors(&resolved.root, diff)?;
+            }
+            put(&mut args, "depth", *depth);
+            put(&mut args, "max_nodes", *max_nodes);
+            "verify_change"
+        }
+        Command::Tests {
+            symbol,
+            path,
+            diff,
+            depth,
+            max_nodes,
+            ..
+        } => {
+            put(&mut args, "symbol", symbol.as_ref());
+            put(&mut args, "path_prefix", path.as_ref());
+            if let Some(diff) = diff {
+                args["diff"] = git::diff_selectors(&resolved.root, diff)?;
+            }
+            put(&mut args, "depth", *depth);
+            put(&mut args, "max_nodes", *max_nodes);
+            "suggest_tests"
         }
         Command::Context {
             symbol,
@@ -622,8 +964,56 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
         }
         _ => unreachable!(),
     };
+    for (side, path) in [("head", &cli.risk_inputs), ("base", &cli.base_risk_inputs)] {
+        if let Some(path) = path {
+            let artifact = semweft_query::risk_inputs::Artifact::load(path)?;
+            if args.get("risk_inputs").is_none() {
+                args["risk_inputs"] = json!({});
+            }
+            args["risk_inputs"][side] = serde_json::to_value(artifact)?;
+        }
+    }
     query::validate(tool, &args)?;
     let mut response = daemon::call(&resolved, tool, args)?;
+    if response.get("error").is_none()
+        && (cli.all_pages
+            || matches!(cli.format, Some(Format::Sarif))
+            || matches!(
+                &cli.command,
+                Command::ArchCheck {
+                    write_baseline: Some(_),
+                    ..
+                }
+            ))
+    {
+        response = reports::collect(&resolved, tool, response)?;
+    }
+    if let Command::ArchCheck {
+        write_baseline: Some(path),
+        ..
+    } = &cli.command
+        && response.get("error").is_none()
+    {
+        let baseline = semweft_query::architecture::baseline(&response)?;
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        use std::io::Write;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        file.write_all(&serde_json::to_vec_pretty(&baseline)?)?;
+        file.as_file().sync_all()?;
+        file.persist(path)?;
+    }
+    if matches!(cli.format, Some(Format::Sarif)) && response.get("error").is_none() {
+        reports::set_source_root(&mut response, &resolved.root)?;
+    }
     if matches!(cli.command, Command::Doctor) && response.get("error").is_none() {
         response["health"] = daemon::call(
             &resolved,
@@ -633,38 +1023,61 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
     }
     Ok(Some(response))
 }
+fn exit_code(value: &Value, verification: bool) -> i32 {
+    if let Some(code) = value["error"]["code"].as_str() {
+        return match code {
+            "trust_required" => 4,
+            "cancelled" => 130,
+            "invalid_argument" | "symbol_not_found" | "ambiguous_symbol" | "file_not_found"
+            | "content_mismatch" | "budget_too_small" | "snapshot_expired" | "cursor_expired"
+            | "config_conflict" | "review_not_found" => 2,
+            _ => 5,
+        };
+    }
+    if verification {
+        return match value["verification"]["status"].as_str() {
+            Some("no_violations_found") => 0,
+            Some("violations_found") => 1,
+            Some("insufficient_evidence") => 3,
+            _ => 5,
+        };
+    }
+    0
+}
 use anyhow::Context;
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
     let format = cli.format.unwrap_or_else(|| {
+        if matches!(cli.command, Command::Hook { .. }) {
+            return Format::Json;
+        }
         if std::io::stdout().is_terminal() {
             Format::Text
         } else {
             Format::Json
         }
     });
-    let (value, exit) = match run(&cli).await {
+    let value = match run(&cli).await {
         Ok(None) => return,
         Ok(Some(mut value)) => {
             if value["matches_cold"] == false {
                 value["error"] = json!({"code":"index_refresh_failed","message":"incremental and cold views differ"});
             }
-            (value, 0)
+            value
         }
-        Err(error) => (query::error_value(&error), 0),
+        Err(error) => query::error_value(&error),
     };
-    let mut exit = exit;
-    if let Some(code) = value["error"]["code"].as_str() {
-        exit = match code {
-            "trust_required" => 4,
-            "cancelled" => 130,
-            "invalid_argument" | "symbol_not_found" | "ambiguous_symbol" | "file_not_found"
-            | "content_mismatch" | "budget_too_small" | "snapshot_expired" | "cursor_expired"
-            | "config_conflict" => 2,
-            _ => 5,
-        };
-    }
+    let mut exit = exit_code(
+        &value,
+        matches!(
+            cli.command,
+            Command::Verify { .. }
+                | Command::ArchCheck { .. }
+                | Command::Guard { .. }
+                | Command::ContractImpact { .. }
+        ) || (matches!(cli.command, Command::Report { .. }) && value.get("verification").is_some()),
+    );
     if matches!(cli.command, Command::Daemon | Command::Mcp) && exit != 0 {
         eprintln!("{value}");
         std::process::exit(exit);
@@ -684,6 +1097,92 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paths_parse_symbol_pairs_filters_limits_and_cursor_only_requests() {
+        let cli = Cli::try_parse_from([
+            "semweft",
+            "path",
+            "entry",
+            "stock",
+            "--path",
+            "src",
+            "--max-depth",
+            "4",
+            "--max-paths",
+            "20",
+            "--max-nodes",
+            "30",
+            "--source",
+            "L1",
+            "--certainty",
+            "candidate",
+        ])
+        .unwrap();
+        assert!(
+            matches!(&cli.command, Command::Path { from:Some(from),to:Some(to),path:Some(path),max_depth:Some(4),max_paths:Some(20),max_nodes:Some(30),.. } if from == "entry" && to == "stock" && path == "src")
+        );
+        assert_eq!(cli.source, ["L1"]);
+        let cli = Cli::try_parse_from(["semweft", "path", "--cursor", "next"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Path {
+                from: None,
+                to: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            common(&cli, false),
+            json!({"timeout_ms":5000,"cursor":"next"})
+        );
+    }
+
+    #[test]
+    fn verification_parses_diff_limits_and_cursor_requests() {
+        let cli = Cli::try_parse_from([
+            "semweft",
+            "verify",
+            "--diff",
+            "WORKTREE",
+            "--depth",
+            "2",
+            "--max-nodes",
+            "10",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Command::Verify { diff:Some(diff), depth:Some(2), max_nodes:Some(10) } if diff == "WORKTREE")
+        );
+        let cli = Cli::try_parse_from(["semweft", "verify", "--cursor", "page"]).unwrap();
+        assert!(matches!(cli.command, Command::Verify { diff: None, .. }));
+        assert_eq!(
+            common(&cli, false),
+            json!({"timeout_ms":5000,"cursor":"page"})
+        );
+    }
+
+    #[test]
+    fn verification_exit_codes_use_the_full_verdict_and_preserve_errors() {
+        for (status, expected) in [
+            ("no_violations_found", 0),
+            ("violations_found", 1),
+            ("insufficient_evidence", 3),
+        ] {
+            let value = json!({"verification":{"status":status},"findings":[]});
+            assert_eq!(exit_code(&value, true), expected);
+            assert_eq!(exit_code(&value, false), 0);
+        }
+        for (code, expected) in [
+            ("invalid_argument", 2),
+            ("trust_required", 4),
+            ("timeout", 5),
+            ("cancelled", 130),
+        ] {
+            assert_eq!(exit_code(&json!({"error":{"code":code}}), true), expected);
+        }
+        assert_eq!(exit_code(&json!({}), true), 5);
+    }
 
     #[test]
     fn impls_parses_path_filters_and_common_arguments() {
@@ -764,6 +1263,46 @@ mod tests {
         assert!(
             parse_budget("18446744073709551615k").is_err(),
             "suffix multiplication must not overflow"
+        );
+    }
+
+    #[test]
+    fn ci_report_commands_parse_all_pages_sarif_and_offline_input() {
+        let cli = Cli::try_parse_from([
+            "semweft",
+            "verify",
+            "--diff",
+            "WORKTREE",
+            "--all-pages",
+            "--format",
+            "sarif",
+        ])
+        .unwrap();
+        assert!(cli.all_pages);
+        assert!(matches!(cli.format, Some(Format::Sarif)));
+        assert!(
+            Cli::try_parse_from([
+                "semweft",
+                "verify",
+                "--diff",
+                "WORKTREE",
+                "--cursor",
+                "next",
+                "--all-pages",
+            ])
+            .is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "semweft",
+            "report",
+            "--input",
+            "verify.json",
+            "--format",
+            "markdown",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Command::Report { input } if input.as_path() == std::path::Path::new("verify.json"))
         );
     }
 }

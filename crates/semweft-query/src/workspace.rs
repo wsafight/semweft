@@ -100,6 +100,7 @@ pub(crate) fn capture_config_cached(
     let root = &resolved.root;
     let members = crate::config::members(root)?;
     let exclude = crate::config::exclusions(&resolved.config.workspace.exclude)?;
+    let protected = resolved.config.guard.path_globs()?;
     let index_dir = resolved.index_dir.clone();
     let cache_dir = resolved.cache.clone();
     let filter_root = root.clone();
@@ -155,7 +156,11 @@ pub(crate) fn capture_config_cached(
             "Cargo.toml" | "Cargo.lock" | "semweft.toml" | "rust-toolchain" | "rust-toolchain.toml"
         ) || relative == ".cargo/config.toml"
             || relative == ".cargo/config";
-        if (!owned || !relative.ends_with(".rs")) && !configuration {
+        if (!owned || !relative.ends_with(".rs"))
+            && !configuration
+            && !protected.is_match(&relative)
+            && !relative.ends_with(".proto")
+        {
             continue;
         }
         let file = if let Some(cache) = cache.as_deref_mut() {
@@ -182,25 +187,17 @@ pub(crate) fn capture_config_cached(
             .max_by_key(|d| d.len());
         let member = owner.is_some_and(|d| members.contains(d));
         let root_config = !path.contains('/') && !path.ends_with(".rs");
-        member || root_config || path == ".cargo/config.toml" || path == ".cargo/config"
+        member
+            || root_config
+            || protected.is_match(path)
+            || path.ends_with(".proto")
+            || path == ".cargo/config.toml"
+            || path == ".cargo/config"
     });
     crate::web::collect(resolved, &mut files, &mut diagnostics)?;
     crate::dependencies::capture(resolved, &mut files, &mut diagnostics)?;
     let trusted = resolved.trusted()?;
-    let revision = std::process::Command::new("git")
-        .current_dir(root)
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "rev-parse",
-            "--verify",
-            "HEAD",
-        ])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .unwrap_or_else(|| "unavailable".into());
+    let revision = crate::git::head_revision(root);
     let manifest = Manifest {
         workspace_id: resolved.workspace_id.clone(),
         files,
@@ -209,7 +206,23 @@ pub(crate) fn capture_config_cached(
             ("syntax".into(), crate::frontend::version()),
             ("semantic".into(), backend.into()),
             ("analysis_config".into(), resolved.analysis_hash()),
+            (
+                "architecture_policy".into(),
+                serde_json::to_string(&resolved.config.architecture)?,
+            ),
+            (
+                "guard_policy".into(),
+                serde_json::to_string(&resolved.config.guard)?,
+            ),
+            (
+                "contracts_policy".into(),
+                serde_json::to_string(&resolved.config.contracts)?,
+            ),
             ("trust".into(), trusted.to_string()),
+            (
+                "service_mapping".into(),
+                serde_json::to_string(&resolved.config.services)?,
+            ),
             ("repository_revision".into(), revision),
             ("engine".into(), env!("CARGO_PKG_VERSION").into()),
         ]),

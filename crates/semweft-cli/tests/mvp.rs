@@ -1,6 +1,18 @@
 use serde_json::{Value, json};
+#[cfg(all(feature = "go-experimental", feature = "web-experimental"))]
+#[path = "support/acceptance.rs"]
+mod acceptance;
+#[path = "support/hosts.rs"]
+mod hosts;
 #[path = "support/p0.rs"]
 mod p0;
+#[cfg(any(feature = "go-experimental", feature = "web-experimental"))]
+#[path = "support/producers.rs"]
+mod producers;
+#[path = "support/product.rs"]
+mod product;
+#[path = "support/stability.rs"]
+mod stability;
 use std::{
     collections::BTreeSet,
     fs,
@@ -818,6 +830,68 @@ fn git_diff_rename_fingerprints_preserve_other_identifiers() {
 }
 
 #[test]
+fn verification_reports_review_findings_exit_codes_and_frozen_pages() {
+    let ws = Workspace::new();
+    ws.git(&["init", "-q"]);
+    ws.git(&["add", "."]);
+    ws.git(&["commit", "-qm", "base"]);
+    fs::write(
+        ws.root.join("src/lib.rs"),
+        SOURCE.replace("fn stock()", "fn inventory()"),
+    )
+    .unwrap();
+    fs::write(
+        ws.root.join("Cargo.toml"),
+        "[package]\nname=\"shop\"\nversion=\"0.2.0\"\nedition=\"2024\"\n",
+    )
+    .unwrap();
+    let (code, first) = ws.run(&["verify", "--diff", "WORKTREE", "--limit", "1"]);
+    assert_eq!(code, 3, "{first}");
+    assert_eq!(first["verification"]["status"], "insufficient_evidence");
+    assert_eq!(first["verification"]["violation_count"], 0);
+    assert_eq!(first["verification"]["rules"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        first["findings"][0]["rule_id"],
+        "configuration_change_requires_review"
+    );
+    assert_eq!(first["findings"][0]["evidence"]["file"], "Cargo.toml");
+    let cursor = first["output"]["continuation"]["next_cursor"]
+        .as_str()
+        .unwrap();
+    fs::write(ws.root.join("src/lib.rs"), SOURCE).unwrap();
+    let (code, next) = ws.run(&["verify", "--cursor", cursor]);
+    assert_eq!(code, 3);
+    assert_eq!(next["verification"], first["verification"]);
+    assert_eq!(next["snapshots"], first["snapshots"]);
+    assert_ne!(next["findings"], first["findings"]);
+    for format in ["text", "markdown"] {
+        let output = ws
+            .command()
+            .args(["verify", "--diff", "WORKTREE", "--format", format])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(3));
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains("核验状态：insufficient_evidence"), "{text}");
+        assert!(
+            text.contains("configuration_change_requires_review@0.1"),
+            "{text}"
+        );
+        assert!(text.contains("Cargo.toml"), "{text}");
+    }
+    for args in [
+        vec!["verify"],
+        vec!["verify", "--diff", "HEAD.."],
+        vec!["verify", "--diff", "WORKTREE", "--snapshot-id", "bad"],
+        vec!["verify", "--diff", "WORKTREE", "--depth", "0"],
+    ] {
+        let (code, value) = ws.run(&args);
+        assert_eq!(code, 2, "{value}");
+        assert_eq!(value["error"]["code"], "invalid_argument");
+    }
+}
+
+#[test]
 fn git_diff_reports_old_name_references_after_a_rename() {
     let ws = Workspace::new();
     ws.git(&["init", "-q"]);
@@ -1316,7 +1390,7 @@ while True:
 }
 
 #[test]
-fn mcp_exposes_eleven_tools_with_implementation_schema_and_queries_the_same_daemon() {
+fn mcp_exposes_product_tools_with_implementation_schema_and_queries_the_same_daemon() {
     let ws = Workspace::new();
     let mut client = Mcp::new(&ws);
     client.send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"mvp-test","version":"1"}}}));
@@ -1325,7 +1399,7 @@ fn mcp_exposes_eleven_tools_with_implementation_schema_and_queries_the_same_daem
     client.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
     let tools = client.reply();
     let tools = tools["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 11);
+    assert_eq!(tools.len(), 19);
     let names: BTreeSet<_> = tools
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
@@ -1344,6 +1418,14 @@ fn mcp_exposes_eleven_tools_with_implementation_schema_and_queries_the_same_daem
             "call_graph",
             "impact_of",
             "context_pack",
+            "verify_change",
+            "find_paths",
+            "suggest_tests",
+            "arch_check",
+            "agent_preflight",
+            "agent_verify",
+            "get_review_result",
+            "contract_impact",
         ])
     );
     let implementations = tools
@@ -1418,6 +1500,367 @@ fn mcp_exposes_eleven_tools_with_implementation_schema_and_queries_the_same_daem
         std::thread::sleep(Duration::from_millis(50));
     }
     drop(client);
+}
+
+#[test]
+fn call_paths_are_available_through_cli_mcp_and_human_reports() {
+    let ws = Workspace::new();
+    let result = ws.ok(&[
+        "path",
+        "entry",
+        "stock",
+        "--source",
+        "L1",
+        "--max-depth",
+        "3",
+        "--max-paths",
+        "10",
+    ]);
+    assert_eq!(result["path_summary"]["path_count"], 1);
+    assert_eq!(result["paths"][0]["length"], 2);
+    assert_eq!(result["paths"][0]["certainty"], "candidate");
+    for format in ["text", "markdown"] {
+        let output = ws
+            .command()
+            .args(["path", "entry", "stock", "--format", format])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains("调用路径"), "{text}");
+        assert!(
+            text.contains("entry")
+                && text.contains("order")
+                && text.contains("stock")
+                && text.contains(" → "),
+            "{text}"
+        );
+        assert!(text.contains("src/lib.rs:3:"), "{text}");
+    }
+    let bounded = ws.ok(&["path", "entry", "stock", "--max-depth", "1"]);
+    assert_eq!(bounded["output"]["truncation_reason"], "depth_limit");
+    assert_eq!(ws.run(&["path", "missing", "stock"]).0, 2);
+    assert_eq!(ws.run(&["path", "entry"]).0, 2);
+    let mut client = Mcp::new(&ws);
+    client.send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"paths-test","version":"1"}}}));
+    assert!(client.reply().get("result").is_some());
+    client.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    client.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"find_paths","arguments":{"from":"entry","to":"stock","source":["L1"],"max_depth":3,"max_paths":10,"snapshot_id":result["snapshot_id"],"semantic_epoch":result["epochs"]["semantic"]}}}));
+    let reply = client.reply();
+    assert_ne!(reply["result"]["isError"], true, "{reply}");
+    let mcp = &reply["result"]["structuredContent"];
+    assert_eq!(mcp["paths"], result["paths"]);
+    assert_eq!(mcp["path_summary"], result["path_summary"]);
+}
+
+#[test]
+fn diff_reports_show_full_module_counts_and_risk_signals_in_human_formats() {
+    let ws = Workspace::new();
+    ws.git(&["init", "-q"]);
+    ws.git(&["add", "."]);
+    ws.git(&["commit", "-qm", "base"]);
+    fs::write(
+        ws.root.join("src/lib.rs"),
+        SOURCE.replace("fn stock()", "fn inventory()"),
+    )
+    .unwrap();
+    let result = ws.ok(&["impact", "--diff", "WORKTREE"]);
+    assert_eq!(result["diff_summary"]["affected_modules_observed"], 2);
+    assert!(result["risk_summary"]["score"].as_u64().is_some());
+    for format in ["text", "markdown"] {
+        let output = ws
+            .command()
+            .args(["impact", "--diff", "WORKTREE", "--format", format])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        for expected in [
+            "Diff（全量）",
+            "风险审查信号（全量）",
+            "风险评分：",
+            "启发式",
+            "受影响文件模块（当前页）",
+            "src/lib.rs | base",
+            "src/lib.rs | head",
+            "residual_references",
+        ] {
+            assert!(text.contains(expected), "{expected}: {text}");
+        }
+    }
+}
+
+#[test]
+fn test_suggestions_are_consistent_through_cli_mcp_and_human_reports() {
+    let ws = Workspace::new();
+    fs::write(ws.root.join("src/lib.rs"), format!("{SOURCE}\n#[test]\nfn stock_test() {{ entry(); }}\n#[test]\n#[ignore]\nfn ignored_test() {{ stock(); }}\n")).unwrap();
+    let result = ws.ok(&[
+        "tests",
+        "stock",
+        "--suggested",
+        "--source",
+        "L1",
+        "--depth",
+        "4",
+    ]);
+    assert_eq!(result["test_summary"]["candidate_count"], 2);
+    assert_eq!(result["test_summary"]["head_nonignored_candidates"], 1);
+    assert_eq!(result["test_summary"]["executed"], false);
+    for format in ["text", "markdown"] {
+        let output = ws
+            .command()
+            .args(["tests", "stock", "--format", format])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        for expected in [
+            "测试候选推荐",
+            "stock_test",
+            "ignored_test",
+            "src/lib.rs:",
+            "call_path",
+            "覆盖信息：不可用",
+            "零候选不表示无需测试",
+        ] {
+            assert!(text.contains(expected), "{expected}: {text}");
+        }
+    }
+    assert_eq!(ws.run(&["tests"]).0, 2);
+    let mut client = Mcp::new(&ws);
+    client.send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"suggestions-test","version":"1"}}}));
+    assert!(client.reply().get("result").is_some());
+    client.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    client.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"suggest_tests","arguments":{"symbol":"stock","source":["L1"],"depth":4,"snapshot_id":result["snapshot_id"],"semantic_epoch":result["epochs"]["semantic"]}}}));
+    let reply = client.reply();
+    assert_ne!(reply["result"]["isError"], true, "{reply}");
+    let mcp = &reply["result"]["structuredContent"];
+    assert_eq!(mcp["test_candidates"], result["test_candidates"]);
+    assert_eq!(mcp["test_summary"], result["test_summary"]);
+}
+
+#[test]
+fn diff_test_suggestions_and_cursor_requests_keep_both_snapshots() {
+    let ws = Workspace::new();
+    fs::write(ws.root.join("src/lib.rs"), format!("{SOURCE}\n#[test]\nfn stock_test() {{ stock(); }}\n#[test]\nfn order_test() {{ order(); }}\n")).unwrap();
+    ws.git(&["init", "-q"]);
+    ws.git(&["add", "."]);
+    ws.git(&["commit", "-qm", "base"]);
+    let source = fs::read_to_string(ws.root.join("src/lib.rs")).unwrap();
+    fs::write(ws.root.join("src/lib.rs"), source.replace("{ 1 }", "{ 2 }")).unwrap();
+    let first = ws.ok(&["tests", "--suggested", "--diff", "WORKTREE", "--limit", "1"]);
+    assert_eq!(first["test_summary"]["candidate_count"], 2);
+    assert_eq!(first["test_candidates"].as_array().unwrap().len(), 1);
+    fs::write(ws.root.join("src/lib.rs"), "pub fn unrelated() {}\n").unwrap();
+    let next = ws.ok(&[
+        "tests",
+        "--cursor",
+        first["output"]["continuation"]["next_cursor"]
+            .as_str()
+            .unwrap(),
+    ]);
+    assert_eq!(first["snapshots"], next["snapshots"]);
+    assert_eq!(first["test_summary"], next["test_summary"]);
+    assert_eq!(next["test_candidates"].as_array().unwrap().len(), 1);
+    assert_ne!(
+        first["test_candidates"][0]["test"]["symbol_id"],
+        next["test_candidates"][0]["test"]["symbol_id"]
+    );
+}
+
+#[test]
+fn mcp_verification_returns_insufficient_evidence_as_a_successful_tool_result() {
+    let ws = Workspace::new();
+    ws.git(&["init", "-q"]);
+    ws.git(&["add", "."]);
+    ws.git(&["commit", "-qm", "base"]);
+    fs::write(
+        ws.root.join("src/lib.rs"),
+        SOURCE.replace("fn stock()", "fn inventory()"),
+    )
+    .unwrap();
+    let (code, cli) = ws.run(&["verify", "--diff", "WORKTREE", "--limit", "1"]);
+    assert_eq!(code, 3);
+    let mut client = Mcp::new(&ws);
+    client.send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"verify-test","version":"1"}}}));
+    assert!(client.reply().get("result").is_some());
+    client.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    let diff = json!({"base":{"kind":"snapshot","snapshot_id":cli["snapshots"]["base"]["snapshot_id"],"semantic_epoch":cli["snapshots"]["base"]["epochs"]["semantic"]},
+        "head":{"kind":"snapshot","snapshot_id":cli["snapshots"]["head"]["snapshot_id"],"semantic_epoch":cli["snapshots"]["head"]["epochs"]["semantic"]}});
+    client.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"verify_change","arguments":{"diff":diff,"limit":1}}}));
+    let reply = client.reply();
+    assert_ne!(reply["result"]["isError"], true, "{reply}");
+    let first = &reply["result"]["structuredContent"];
+    for field in [
+        "status",
+        "rules",
+        "finding_count",
+        "violation_count",
+        "warning_count",
+    ] {
+        assert_eq!(
+            first["verification"][field], cli["verification"][field],
+            "{field}"
+        );
+    }
+    client.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"verify_change","arguments":{"cursor":first["output"]["continuation"]["next_cursor"]}}}));
+    let reply = client.reply();
+    assert_ne!(reply["result"]["isError"], true, "{reply}");
+    let next = &reply["result"]["structuredContent"];
+    assert_eq!(next["verification"], first["verification"]);
+    assert_eq!(next["snapshots"], first["snapshots"]);
+    assert_eq!(
+        next["findings"][0]["rule_id"],
+        "residual_reference_requires_review"
+    );
+}
+
+#[test]
+fn ci_exports_all_verification_pages_and_renders_sarif_offline_with_verdict_exit_code() {
+    let ws = Workspace::new();
+    ws.git(&["init", "-q"]);
+    ws.git(&["add", "."]);
+    ws.git(&["commit", "-qm", "base"]);
+    fs::write(
+        ws.root.join("src/lib.rs"),
+        SOURCE.replace("fn stock()", "fn inventory()"),
+    )
+    .unwrap();
+
+    let (exit, complete) = ws.run(&[
+        "verify",
+        "--diff",
+        "WORKTREE",
+        "--limit",
+        "1",
+        "--all-pages",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(exit, 3, "{complete}");
+    assert_eq!(complete["output"]["all_pages"], true);
+    assert_eq!(complete["output"]["truncated"], false);
+    assert_eq!(
+        complete["findings"].as_array().unwrap().len() as u64,
+        complete["verification"]["finding_count"]
+    );
+    assert!(complete["output"]["continuation"]["next_cursor"].is_null());
+
+    let input = ws.temp.path().join("verify.json");
+    fs::write(&input, serde_json::to_vec(&complete).unwrap()).unwrap();
+    let offline = ws
+        .command()
+        .args([
+            "report",
+            "--input",
+            input.to_str().unwrap(),
+            "--format",
+            "sarif",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(offline.status.code(), Some(3));
+    let sarif: Value = serde_json::from_slice(&offline.stdout).unwrap();
+    assert_eq!(sarif["version"], "2.1.0");
+    assert_eq!(
+        sarif["runs"][0]["results"].as_array().unwrap().len() as u64,
+        complete["verification"]["finding_count"]
+    );
+    assert_eq!(
+        sarif["runs"][0]["properties"]["snapshots"],
+        complete["snapshots"]
+    );
+
+    let direct = ws
+        .command()
+        .args([
+            "verify", "--diff", "WORKTREE", "--limit", "1", "--format", "sarif",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(direct.status.code(), Some(3));
+    let direct: Value = serde_json::from_slice(&direct.stdout).unwrap();
+    assert_eq!(
+        direct["runs"][0]["results"].as_array().unwrap().len() as u64,
+        complete["verification"]["finding_count"]
+    );
+}
+
+#[test]
+fn ci_report_converts_index_errors_to_sarif_without_changing_failure_status() {
+    let ws = Workspace::new();
+    let input = ws.temp.path().join("error.json");
+    fs::write(&input, br#"{"schema_version":"0.1","error":{"code":"index_refresh_failed","message":"index unavailable"}}"#).unwrap();
+    let output = ws
+        .command()
+        .args([
+            "report",
+            "--input",
+            input.to_str().unwrap(),
+            "--format",
+            "sarif",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    let sarif: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        sarif["runs"][0]["invocations"][0]["executionSuccessful"],
+        false
+    );
+    assert_eq!(sarif["runs"][0]["results"], json!([]));
+}
+
+#[test]
+fn checked_in_ci_script_preserves_verdict_and_writes_all_report_formats() {
+    let ws = Workspace::new();
+    ws.git(&["init", "-q"]);
+    ws.git(&["add", "."]);
+    ws.git(&["commit", "-qm", "base"]);
+    fs::write(
+        ws.root.join("src/lib.rs"),
+        SOURCE.replace("fn stock()", "fn inventory()"),
+    )
+    .unwrap();
+    let reports = ws.temp.path().join("ci-reports");
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/ci/semweft-ci.sh");
+    let status = Command::new("sh")
+        .arg(script)
+        .current_dir(&ws.root)
+        .env("SEMWEFT_BIN", env!("CARGO_BIN_EXE_semweft"))
+        .env("SEMWEFT_DIFF", "WORKTREE")
+        .env("SEMWEFT_REPORT_DIR", &reports)
+        .env("SEMWEFT_CACHE_DIR", ws.temp.path().join("cache"))
+        .env("SEMWEFT_CONFIG_DIR", ws.temp.path().join("config"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        status.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(reports.join("exit-code.txt"))
+            .unwrap()
+            .trim(),
+        "3"
+    );
+    let verification: Value =
+        serde_json::from_slice(&fs::read(reports.join("verify.json")).unwrap()).unwrap();
+    assert_eq!(verification["output"]["all_pages"], true);
+    assert_eq!(
+        verification["findings"].as_array().unwrap().len() as u64,
+        verification["verification"]["finding_count"]
+    );
+    let markdown = fs::read_to_string(reports.join("verify.markdown")).unwrap();
+    assert!(markdown.contains("核验状态：insufficient_evidence"));
+    let sarif: Value =
+        serde_json::from_slice(&fs::read(reports.join("verify.sarif")).unwrap()).unwrap();
+    assert_eq!(
+        sarif["runs"][0]["results"].as_array().unwrap().len() as u64,
+        verification["verification"]["finding_count"]
+    );
 }
 
 #[test]

@@ -1,4 +1,5 @@
 //! Minimal LSP probe transport, isolated from the eventual public query API.
+use crate::sync::MutexExt;
 use anyhow::{Context, Result, bail};
 use semweft_core::*;
 use serde_json::{Value, json};
@@ -61,7 +62,7 @@ impl Cancellation {
         Ok(())
     }
     fn stop(&self) {
-        if let Some(mut child) = self.child.lock().unwrap().take() {
+        if let Some(mut child) = self.child.locked().take() {
             crate::process::terminate_tree(&mut child);
         }
     }
@@ -108,7 +109,7 @@ impl LspClient {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        let mut slot = cancellation.child.lock().unwrap();
+        let mut slot = cancellation.child.locked();
         cancellation.check()?;
         let mut child = command
             .spawn()

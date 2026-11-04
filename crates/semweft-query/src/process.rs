@@ -35,6 +35,13 @@ pub fn output_cancellable(
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<Option<Output>> {
     let deadline = crate::query::bound_deadline(deadline);
+    crate::query::check_cancelled()?;
+    if cancelled() {
+        return Ok(None);
+    }
+    if Instant::now() >= deadline {
+        bail!("timeout: external tool exceeded query deadline");
+    }
     let mut stdout = tempfile::tempfile()?;
     let mut stderr = tempfile::tempfile()?;
     #[cfg(unix)]
@@ -79,6 +86,84 @@ pub fn output_cancellable(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pre_cancelled_commands_are_not_spawned() {
+        assert!(
+            output_cancellable(
+                &mut Command::new("/semweft-fixture-nonexistent-executable"),
+                Instant::now() + Duration::from_secs(5),
+                || true,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn expired_commands_are_not_spawned() {
+        let error = output(
+            &mut Command::new("/semweft-fixture-nonexistent-executable"),
+            Instant::now() - Duration::from_millis(1),
+        )
+        .unwrap_err();
+        assert!(error.to_string().starts_with("timeout:"), "{error:#}");
+    }
+
+    #[test]
+    fn command_output_preserves_stdout_stderr_and_failure_status() {
+        let output = output(
+            Command::new("sh").args(["-c", "printf 'output'; printf 'failure' >&2; exit 7"]),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(output.stdout, b"output");
+        assert_eq!(output.stderr, b"failure");
+    }
+
+    #[test]
+    fn large_output_on_both_streams_does_not_block() {
+        let output = output(
+            Command::new("sh").args([
+                "-c",
+                "head -c 262144 /dev/zero; head -c 262144 /dev/zero >&2",
+            ]),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 262144);
+        assert_eq!(output.stderr.len(), 262144);
+    }
+
+    #[test]
+    fn cancellation_stops_running_process_descendants() {
+        let temp = tempfile::tempdir().unwrap();
+        let started = temp.path().join("started");
+        let escaped = temp.path().join("escaped");
+        let output = output_cancellable(
+            Command::new("sh")
+                .current_dir(temp.path())
+                .args(["-c", "(touch started; sleep 0.3; touch escaped) & sleep 30"]),
+            Instant::now() + Duration::from_secs(5),
+            || started.exists(),
+        )
+        .unwrap();
+        assert!(output.is_none());
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!escaped.exists());
+    }
+
+    #[test]
+    fn missing_executable_reports_startup_failure() {
+        let error = output(
+            &mut Command::new("/semweft-fixture-nonexistent-executable"),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(error.to_string().starts_with("indexer_unavailable:"));
+    }
     #[test]
     fn timeout_and_shared_cancellation_stop_process_trees() {
         let started = Instant::now();

@@ -1,5 +1,6 @@
 //! Captured dependency sources retain virtual paths and an explicit disk map.
 use crate::config::Resolved;
+use crate::sync::MutexExt;
 use anyhow::{Context, Result};
 use semweft_core::*;
 use serde_json::{Value, json};
@@ -31,7 +32,7 @@ fn metadata(resolved: &Resolved, files: &BTreeMap<String, SourceFile>) -> Result
             .collect::<BTreeMap<_, _>>(),
     )?);
     {
-        let cached = cache.lock().unwrap();
+        let cached = cache.locked();
         if let Some(entry) = cached.get(&resolved.root)
             && entry.inputs == inputs
             && entry
@@ -65,7 +66,7 @@ fn metadata(resolved: &Resolved, files: &BTreeMap<String, SourceFile>) -> Result
         .filter_map(|p| p["manifest_path"].as_str())
         .map(|p| Ok((PathBuf::from(p), digest(fs::read(p)?))))
         .collect::<Result<BTreeMap<_, _>>>()?;
-    cache.lock().unwrap().insert(
+    cache.locked().insert(
         resolved.root.clone(),
         MetadataCache {
             inputs,

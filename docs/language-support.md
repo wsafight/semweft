@@ -10,7 +10,13 @@ tree-sitter 先提供 L1，批量语义索引与常驻语义服务提供 L3 证�
 
 ## 当前实验实现
 
-Rust 的语法、SCIP 与 rust-analyzer 路径已经实现；Go 通过 `go-experimental` 启用。新增 `web-experimental` 提供 TS/JS/TSX 语法候选、package.json 项目捕获、ES 相对模块依赖、引用/调用查询及 Git 双侧 diff。桌面构建会同时启用这两个 feature。TS/JS 不执行 Node/npm，不支持常驻 tsserver、tsconfig aliases、动态导入或 CommonJS 语义绑定；生成目录与 node_modules 排除。已导入的 SCIP 仍须通过源清单校验。
+Rust 的语法、SCIP 与 rust-analyzer 路径已经实现；Go 通过 `go-experimental` 启用，支持授权后的 scip-go 项目重建。`web-experimental` 提供 TS/JS/TSX、package.json 捕获、本地 JSONC tsconfig 单继承 paths/baseUrl 候选、literal import()/require()、导航和双侧 diff，新增授权后的 scip-typescript 项目重建。它不是常驻 tsserver，L1 模块候选不等于类型/词法绑定；真实 L3 仍需源清单匹配的 SCIP。Semweft 不自动下载项目依赖或安装 npm 工具，生成目录与 node_modules 排除。桌面构建同时启用两个 feature。正式验收仍未完成，详见 [语言验收状态](language-acceptance.md)。
+
+Go 可在 `semweft.toml` 中设置 `[go] tags = ["purego"]`。未设置 tags 时继承进程的 GOFLAGS；显式空数组清空 GOFLAGS，非空数组排序去重后替换为 `-tags=a,b`，不会合并其他环境 GOFLAGS。GOFLAGS、GOOS、GOARCH、CGO_ENABLED、GOWORK、GOTOOLCHAIN、GOENV、GOPATH、GOROOT、GOEXPERIMENT 的有效值冻结进快照并用于生产器执行；历史语义复用也要求相同上下文与解析器版本。Git revision 查询按当前分析/构建环境尝试复用，不代表恢复历史机器环境。Go 模块内的汇编、头文件及常见 C/C++/Objective-C/Fortran 文本构建输入也参与捕获与监听。外部 GOENV 文件内容、工具链/依赖二进制、CGO 的其他环境和生成器输入仍未完整冻结。
+
+TS/JS 的匿名默认导出函数保留 `default` 所有者，匿名回调/箭头函数获得独立的 `<anonymous@行:列>` 所有者，函数体内调用不会归入外围函数。`callback_invocation_not_modeled` 诊断披露回调的执行入口与动态流尚未建模，当前不会凭词法嵌套创建外围函数到回调的执行边。
+
+真实 scip-typescript 0.6.0 的 JS 验证表明：匿名默认导出函数缺少定义/导入目标记录，使用方的别名只有未对齐的 local 符号。该函数体内的具名调用仍可提供 L3，导入方调用保持未解析；具名默认导出作为对照可对齐。Semweft 不用语法猜测补造这部分 L3，报告保留 `scip_unresolved_call` 等缺口。
 
 以下矩阵保留正式支持的长期规划，不将实验实现视为语义完整支持。
 

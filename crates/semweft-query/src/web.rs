@@ -47,6 +47,7 @@ pub fn collect(
         return Ok(());
     }
     let exclude = crate::config::exclusions(&resolved.config.workspace.exclude)?;
+    let protected = resolved.config.guard.path_globs()?;
     for entry in ignore::WalkBuilder::new(&resolved.root)
         .hidden(false)
         .follow_links(false)
@@ -109,6 +110,12 @@ pub fn collect(
             continue;
         }
         if is_source(&path)
+            || path.ends_with(".proto")
+            || entry.file_name().to_str().is_some_and(|name| {
+                (name.starts_with("tsconfig") || name.starts_with("jsconfig"))
+                    && name.ends_with(".json")
+            })
+            || protected.is_match(&path)
             || matches!(
                 entry.file_name().to_str(),
                 Some(
@@ -132,7 +139,7 @@ pub fn collect(
         }
     }
     if files.keys().any(|p| is_source(p)) {
-        diagnostics.push(Diagnostic { code: "web_syntax_scope".into(), file: None, message: "TS/JS syntax candidates: lexical binding, tsconfig aliases, dynamic imports, CommonJS exports, anonymous callback ownership and external consumers are not resolved. Resident language server is not enabled.".into() });
+        diagnostics.push(Diagnostic { code: "web_syntax_scope".into(), file: None, message: "TS/JS syntax candidates: local tsconfig paths and literal imports provide candidate file dependencies only. Lexical/type binding requires a verified SCIP index. Conditional exports, runtime module expressions, callback execution flow and external consumers are not exhaustive.".into() });
     }
     Ok(())
 }
@@ -141,7 +148,8 @@ pub fn capture(resolved: &Resolved, backend: &str) -> Result<Capture> {
     let mut diagnostics = vec![];
     collect(resolved, &mut files, &mut diagnostics)?;
     Ok(Capture { manifest: Manifest { workspace_id: resolved.workspace_id.clone(), files, binary_files: BTreeMap::new(), analysis_versions: BTreeMap::from([
-        ("syntax".into(), crate::frontend::version()), ("semantic".into(), backend.into()), ("analysis_config".into(), resolved.analysis_hash()), ("trust".into(), resolved.trusted()?.to_string()), ("engine".into(), env!("CARGO_PKG_VERSION").into()),
+        ("service_mapping".into(),serde_json::to_string(&resolved.config.services)?),
+        ("syntax".into(), crate::frontend::version()), ("semantic".into(), backend.into()), ("analysis_config".into(), resolved.analysis_hash()), ("architecture_policy".into(),serde_json::to_string(&resolved.config.architecture)?),("guard_policy".into(),serde_json::to_string(&resolved.config.guard)?),("contracts_policy".into(),serde_json::to_string(&resolved.config.contracts)?),("repository_revision".into(),crate::git::head_revision(&resolved.root)), ("trust".into(), resolved.trusted()?.to_string()), ("engine".into(), env!("CARGO_PKG_VERSION").into()),
     ]), scope: "TS/JS package tree, gitignore and exclusions respected; generated output, node_modules, symlinks and dependency sources excluded; syntax candidates only".into() }, bytes: BTreeMap::new(), diagnostics })
 }
 pub fn augment_map(
@@ -149,6 +157,7 @@ pub fn augment_map(
     args: &Value,
     entries: &mut Vec<Value>,
     dependencies: &mut Vec<Value>,
+    gaps: &mut Vec<Value>,
     mode: &str,
     deadline: std::time::Instant,
 ) -> Result<()> {
@@ -191,31 +200,15 @@ pub fn augment_map(
         {
             continue;
         }
-        for import in imports.iter().filter(|p| p.starts_with('.')) {
+        for import in imports {
             crate::query::check_deadline(deadline)?;
-            let mut parts: Vec<_> = path.split('/').collect();
-            parts.pop();
-            for part in import.split('/') {
-                match part {
-                    "." => {}
-                    ".." => {
-                        parts.pop();
-                    }
-                    p => parts.push(p),
+            match crate::module_resolution::resolve(stored,path,import,deadline) {
+                Ok(Some(target)) => dependencies.push(json!({"from":path,"to":target,"specifier":import,"source":"L1","certainty":"candidate","basis":"captured relative import or local tsconfig paths/baseUrl; not runtime or type binding"})),
+                Ok(None) => gaps.push(json!({"kind":"module_not_resolved_to_captured_file","file":path,"specifier":import,"reason":"Dependency may be external, excluded, runtime-resolved or require semantic module resolution"})),
+                Err(error) => {
+                    if matches!(crate::query::error_value(&error)["error"]["code"].as_str(),Some("timeout" | "cancelled")) { return Err(error); }
+                    gaps.push(json!({"kind":"module_resolution_configuration_gap","file":path,"specifier":import,"reason":error.to_string()}));
                 }
-            }
-            let base = parts.join("/");
-            let mut candidates = vec![base.clone()];
-            let stem = base
-                .strip_suffix(".js")
-                .or_else(|| base.strip_suffix(".mjs"))
-                .unwrap_or(&base);
-            for ext in ["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"] {
-                candidates.push(format!("{stem}.{ext}"));
-                candidates.push(format!("{base}/index.{ext}"));
-            }
-            if let Some(target) = candidates.iter().find(|p| files.contains_key(*p)) {
-                dependencies.push(json!({"from":path,"to":target,"source":"L1","certainty":"candidate","basis":"relative ES import/export to captured file; aliases and conditional exports not evaluated"}));
             }
         }
     }

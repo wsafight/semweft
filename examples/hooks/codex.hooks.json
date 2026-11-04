@@ -1,0 +1,6 @@
+{
+  "hooks": {
+    "PreToolUse": [{ "matcher": "apply_patch", "hooks": [{ "type": "command", "command": "semweft hook --host codex", "timeout": 15 }] }],
+    "PostToolUse": [{ "matcher": "apply_patch", "hooks": [{ "type": "command", "command": "semweft hook --host codex", "timeout": 15 }] }]
+  }
+}

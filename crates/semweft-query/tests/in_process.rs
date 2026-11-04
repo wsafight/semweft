@@ -7,6 +7,239 @@ use std::{
 };
 
 #[test]
+fn simple_call_paths_preserve_evidence_bounds_filters_and_frozen_pages() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname=\"paths\"\nversion=\"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("semweft.toml"),
+        "schema_version=\"0.1\"\n[index]\ndirectory=\"index\"\n",
+    )
+    .unwrap();
+    fs::write(root.join("src/lib.rs"), "pub fn target() {}\npub fn left() { target(); entry(); }\npub fn right() { target(); }\npub fn entry() { left(); right(); target(); }\n").unwrap();
+    let engine = Engine::new(config::resolve(Some(&root), None).unwrap()).unwrap();
+    let service = QueryService::new(engine.clone());
+    let deadline = || Instant::now() + Duration::from_secs(10);
+    let first = service
+        .execute(
+            "find_paths",
+            json!({"from":"entry","to":"target","limit":1}),
+            deadline(),
+        )
+        .unwrap();
+    assert_eq!(first["path_summary"]["path_count"], 3);
+    assert_eq!(first["path_summary"]["enumeration_complete"], true);
+    assert_eq!(first["output"]["returned_paths"], 1);
+    assert_eq!(first["output"]["remaining_paths"], 2);
+    let pinned = json!({"from":"entry","to":"target","snapshot_id":first["snapshot_id"],"semantic_epoch":first["epochs"]["semantic"]});
+    for (parameter, value, reason) in [
+        ("max_depth", 1, "depth_limit"),
+        ("max_paths", 1, "path_limit"),
+        ("max_nodes", 1, "node_limit"),
+    ] {
+        let mut args = pinned.clone();
+        args[parameter] = json!(value);
+        let bounded = service.execute("find_paths", args, deadline()).unwrap();
+        assert_eq!(
+            bounded["path_summary"]["enumeration_complete"], false,
+            "{bounded}"
+        );
+        assert_eq!(bounded["output"]["truncation_reason"], reason, "{bounded}");
+        assert!(bounded["output"]["remaining_paths"].is_null());
+        assert!(bounded["output"]["remaining_relations"].is_null());
+        assert_eq!(
+            bounded["output"]["continuation"]["suggested"]["snapshot_id"],
+            first["snapshot_id"]
+        );
+    }
+    for filter in [
+        json!({"source":["L3"]}),
+        json!({"certainty":["definite"]}),
+        json!({"path_prefix":"missing"}),
+    ] {
+        let mut args = pinned.clone();
+        args.as_object_mut()
+            .unwrap()
+            .extend(filter.as_object().unwrap().clone());
+        let empty = service.execute("find_paths", args, deadline()).unwrap();
+        assert_eq!(empty["paths"], json!([]));
+        assert_eq!(empty["path_summary"]["enumeration_complete"], true);
+    }
+    let same = service
+        .execute(
+            "find_paths",
+            json!({"from":"target","to":"target"}),
+            deadline(),
+        )
+        .unwrap();
+    assert_eq!(same["paths"][0]["length"], 0);
+    assert_eq!(same["paths"][0]["relations"], json!([]));
+    let absent = service
+        .execute(
+            "find_paths",
+            json!({"from":"target","to":"entry"}),
+            deadline(),
+        )
+        .unwrap();
+    assert_eq!(absent["paths"], json!([]));
+    assert_eq!(absent["output"]["truncated"], false);
+    let cursor = first["output"]["continuation"]["next_cursor"]
+        .as_str()
+        .unwrap();
+    let changed = service
+        .execute(
+            "find_paths",
+            json!({"cursor":cursor,"to":"left"}),
+            deadline(),
+        )
+        .unwrap_err();
+    assert_eq!(
+        semweft_query::query::error_value(&changed)["error"]["code"],
+        "invalid_argument"
+    );
+    fs::write(root.join("src/lib.rs"), "pub fn other() {}\n").unwrap();
+    engine.scan(false).unwrap();
+    let mut page = first.clone();
+    let mut paths = vec![];
+    loop {
+        assert_eq!(page["path_summary"], first["path_summary"]);
+        assert_eq!(page["snapshot_id"], first["snapshot_id"]);
+        assert_eq!(page["epochs"], first["epochs"]);
+        let path = &page["paths"][0];
+        assert_eq!(path["certainty"], "candidate");
+        assert_eq!(
+            path["symbol_ids"].as_array().unwrap().len() as u64,
+            path["length"].as_u64().unwrap() + 1
+        );
+        assert_eq!(page["output"]["returned_relations"], path["length"]);
+        for relation in path["relations"].as_array().unwrap() {
+            assert_eq!(relation["kind"], "call");
+            assert_eq!(relation["evidence"][0]["source"], "L1");
+            assert_eq!(relation["location"]["file"], "src/lib.rs");
+        }
+        paths.push(path["path_id"].as_str().unwrap().to_owned());
+        let Some(next) = page["output"]["continuation"]["next_cursor"].as_str() else {
+            break;
+        };
+        page = service
+            .execute("find_paths", json!({"cursor":next}), deadline())
+            .unwrap();
+    }
+    assert_eq!(
+        paths
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3
+    );
+    let replay = service
+        .execute("find_paths", json!({"cursor":cursor}), deadline())
+        .unwrap();
+    assert_eq!(replay["paths"][0]["path_id"], paths[1]);
+    engine.shutdown();
+}
+
+#[test]
+fn verification_pages_bind_both_snapshots_and_keep_full_verdicts() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname=\"verify\"\nversion=\"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("semweft.toml"),
+        "schema_version=\"0.1\"\n[index]\ndirectory=\"index\"\n",
+    )
+    .unwrap();
+    let source = "pub fn stock() -> i32 { 1 }\npub fn order() -> i32 { stock() }\n";
+    fs::write(root.join("src/lib.rs"), source).unwrap();
+    let engine = Engine::new(config::resolve(Some(&root), None).unwrap()).unwrap();
+    let base = engine.scan(false).unwrap();
+    fs::write(
+        root.join("src/lib.rs"),
+        source.replace("fn stock()", "fn inventory()"),
+    )
+    .unwrap();
+    let head = engine.scan(false).unwrap();
+    let service = QueryService::new(engine.clone());
+    let deadline = || Instant::now() + Duration::from_secs(10);
+    let diff = json!({"base":{"kind":"snapshot","snapshot_id":base.snapshot.snapshot_id,"semantic_epoch":0},
+        "head":{"kind":"snapshot","snapshot_id":head.snapshot.snapshot_id,"semantic_epoch":0}});
+    let impact = service
+        .execute("impact_of", json!({"diff":diff}), deadline())
+        .unwrap();
+    let first = service
+        .execute("verify_change", json!({"diff":diff,"limit":1}), deadline())
+        .unwrap();
+    assert_eq!(first["snapshots"], impact["snapshots"]);
+    assert_eq!(first["changes"], impact["changes"]);
+    assert_eq!(first["verification"]["status"], "insufficient_evidence");
+    assert_eq!(first["verification"]["violation_count"], 0);
+    assert_eq!(first["findings"].as_array().unwrap().len(), 1);
+    assert_eq!(first["output"]["truncation_reason"], "page_limit");
+    let cursor = first["output"]["continuation"]["next_cursor"]
+        .as_str()
+        .unwrap();
+    let wrong_tool = service
+        .execute("impact_of", json!({"cursor":cursor}), deadline())
+        .unwrap_err();
+    assert_eq!(
+        semweft_query::query::error_value(&wrong_tool)["error"]["code"],
+        "cursor_expired"
+    );
+    let wrong_limit = service
+        .execute(
+            "verify_change",
+            json!({"cursor":cursor,"limit":2}),
+            deadline(),
+        )
+        .unwrap_err();
+    assert_eq!(
+        semweft_query::query::error_value(&wrong_limit)["error"]["code"],
+        "invalid_argument"
+    );
+    fs::write(root.join("src/lib.rs"), "pub fn unrelated() {}\n").unwrap();
+    engine.scan(false).unwrap();
+    let mut page = first.clone();
+    let mut findings = vec![];
+    let mut relations = vec![];
+    loop {
+        assert_eq!(page["verification"], first["verification"]);
+        assert_eq!(page["snapshots"], first["snapshots"]);
+        assert!(page["output"]["returned_items"].as_u64().unwrap() <= 1);
+        findings.extend(page["findings"].as_array().unwrap().iter().cloned());
+        relations.extend(page["relations"].as_array().unwrap().iter().cloned());
+        let Some(next) = page["output"]["continuation"]["next_cursor"].as_str() else {
+            break;
+        };
+        page = service
+            .execute("verify_change", json!({"cursor":next}), deadline())
+            .unwrap();
+    }
+    assert_eq!(
+        findings.len() as u64,
+        first["verification"]["finding_count"].as_u64().unwrap()
+    );
+    assert_eq!(relations, *impact["relations"].as_array().unwrap());
+    let residual = findings
+        .iter()
+        .find(|item| item["rule_id"] == "residual_reference_requires_review")
+        .unwrap();
+    assert_eq!(residual["evidence"]["location"]["file"], "src/lib.rs");
+    assert_eq!(residual["evidence"]["location"]["line"], 2);
+    assert_eq!(residual["evidence"]["certainty"], "candidate");
+    engine.shutdown();
+}
+
+#[test]
 fn cargo_membership_is_independent_of_source_ignore_rules() {
     for members in ["\"crates/*\"", "\"crates/visible\",\"crates/hidden\""] {
         let temp = tempfile::tempdir().unwrap();

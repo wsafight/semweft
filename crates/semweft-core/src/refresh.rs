@@ -233,7 +233,23 @@ impl RefreshCoordinator {
         let pending_units = manifest
             .files
             .keys()
-            .filter(|p| !blocked && (p.ends_with(".rs") || p.ends_with(".go")))
+            .filter(|path| {
+                !blocked
+                    && matches!(
+                        path.rsplit('.').next(),
+                        Some(
+                            "rs" | "go"
+                                | "ts"
+                                | "tsx"
+                                | "js"
+                                | "jsx"
+                                | "mts"
+                                | "cts"
+                                | "mjs"
+                                | "cjs"
+                        )
+                    )
+            })
             .cloned()
             .collect();
         let known_gaps = syntax.diagnostics.clone();
@@ -340,12 +356,16 @@ impl RefreshCoordinator {
                 _ => return Ok(full(Some(&base), &format!("skeleton_unavailable: {path}"))),
             }
         }
+        let changed_set: BTreeSet<&str> = changed.iter().map(String::as_str).collect();
         // Declarations in changed files may have moved; map them by a key that
         // an unchanged skeleton preserves, and only when it is unambiguous.
         let key = |s: &Symbol| (s.file.clone(), s.qualified_name.clone(), s.kind.clone());
         let unique = |symbols: &[Symbol]| {
             let mut map: BTreeMap<_, Option<Symbol>> = BTreeMap::new();
-            for symbol in symbols.iter().filter(|s| changed.contains(&s.file)) {
+            for symbol in symbols
+                .iter()
+                .filter(|s| changed_set.contains(s.file.as_str()))
+            {
                 map.entry(key(symbol))
                     .and_modify(|e| *e = None)
                     .or_insert_with(|| Some(symbol.clone()));
@@ -371,7 +391,7 @@ impl RefreshCoordinator {
             .map(|r| (&r.callsite_id, r))
             .collect();
         let remap = |target: &Target| -> Option<Target> {
-            if !changed.contains(&target.file) {
+            if !changed_set.contains(target.file.as_str()) {
                 return Some(target.clone());
             }
             let old_symbol = old_symbols.get(&target.symbol_id)?;
@@ -393,7 +413,7 @@ impl RefreshCoordinator {
             reused: vec![],
         };
         for call in &new.syntax.calls {
-            let reused = (!changed.contains(&call.file))
+            let reused = (!changed_set.contains(call.file.as_str()))
                 .then(|| old_calls.get(&call.callsite_id))
                 .flatten()
                 .filter(|old| old.caller_id == call.caller_id && old.kind == call.kind)
@@ -515,14 +535,23 @@ impl RefreshCoordinator {
                 if target.concrete_function && symbol.kind != "function" {
                     return Err("invalid_target_assertion".into());
                 }
-                let certainty = if !multiple
-                    && !resolution.cfg_inactive
-                    && call.kind == CallKind::Direct
-                    && target.concrete_function
-                    && matches!(
+                let static_binding = match call.kind {
+                    CallKind::Direct => matches!(
                         target.derivation,
                         TargetDerivation::Definition | TargetDerivation::ScipBinding
-                    ) {
+                    ),
+                    CallKind::Method => {
+                        target.derivation == TargetDerivation::ScipGoStaticBinding
+                            && call.file.ends_with(".go")
+                            && target.file.ends_with(".go")
+                    }
+                    CallKind::Indirect => false,
+                };
+                let certainty = if !multiple
+                    && !resolution.cfg_inactive
+                    && target.concrete_function
+                    && static_binding
+                {
                     Certainty::Definite
                 } else {
                     Certainty::Candidate

@@ -77,6 +77,48 @@ fn publish(coordinator: &mut RefreshCoordinator, version: &str) -> Arc<AnalysisV
     coordinator.publish_inputs(manifest, syntax).unwrap()
 }
 
+#[test]
+fn every_web_extension_stays_pending_until_its_own_semantic_publication() {
+    for extension in ["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"] {
+        let path = format!("src/entry.{extension}");
+        let mut coordinator = RefreshCoordinator::default();
+        let mut manifest = Manifest {
+            workspace_id: "web-pending".into(),
+            files: BTreeMap::from([(path.clone(), SourceFile::new("export const value = 1;"))]),
+            binary_files: BTreeMap::new(),
+            analysis_versions: BTreeMap::from([("semantic".into(), "fixture@1".into())]),
+            scope: "fixture".into(),
+        };
+        for value in [1, 2] {
+            manifest.files.insert(
+                path.clone(),
+                SourceFile::new(format!("export const value = {value};")),
+            );
+            let pending = coordinator
+                .publish_inputs(manifest.clone(), SyntaxFacts::default())
+                .unwrap();
+            assert_eq!(pending.pending_units, vec![path.clone()], "{extension}");
+            assert_ne!(pending.epochs.syntax_epoch, pending.epochs.semantic_epoch);
+            let ticket = coordinator.begin_refresh().unwrap();
+            let current = coordinator
+                .complete(
+                    &ticket,
+                    SemanticBatch {
+                        snapshot_id: pending.snapshot.snapshot_id.clone(),
+                        syntax_epoch: pending.epochs.syntax_epoch,
+                        input_hash: pending.snapshot.input_hash.clone(),
+                        backend: "fixture@1".into(),
+                        resolutions: vec![],
+                        diagnostics: vec![],
+                    },
+                )
+                .unwrap();
+            assert!(current.pending_units.is_empty());
+            assert_eq!(current.epochs.syntax_epoch, current.epochs.semantic_epoch);
+        }
+    }
+}
+
 fn batch(view: &AnalysisView) -> SemanticBatch {
     SemanticBatch {
         snapshot_id: view.snapshot.snapshot_id.clone(),
@@ -288,6 +330,43 @@ fn implementation_targets_are_candidates_with_their_own_derivation() {
         current.relations[0].evidence[0].derivation,
         "lsp_implementation+syntax_callsite"
     );
+}
+
+#[test]
+fn scip_go_static_dispatch_requires_concrete_current_go_bindings() {
+    for (extension, kind, concrete, inactive, expected) in [
+        ("go", "function", true, false, Certainty::Definite),
+        ("go", "trait_method", false, false, Certainty::Candidate),
+        ("go", "function", true, true, Certainty::Candidate),
+        ("ts", "function", true, false, Certainty::Candidate),
+        ("rs", "function", true, false, Certainty::Candidate),
+    ] {
+        let (mut manifest, mut syntax) = input("static");
+        let path = format!("src/lib.{extension}");
+        let file = manifest.files.remove("src/lib.rs").unwrap();
+        manifest.files.insert(path.clone(), file);
+        for symbol in &mut syntax.symbols {
+            symbol.file = path.clone();
+        }
+        syntax.symbols[1].kind = kind.into();
+        syntax.calls[0].file = path.clone();
+        syntax.calls[0].kind = CallKind::Method;
+        let mut coordinator = RefreshCoordinator::default();
+        let pending = coordinator.publish_inputs(manifest, syntax).unwrap();
+        let ticket = coordinator.begin_refresh().unwrap();
+        let mut batch = batch(&pending);
+        batch.resolutions[0].cfg_inactive = inactive;
+        let target = &mut batch.resolutions[0].targets[0];
+        target.file = path;
+        target.concrete_function = concrete;
+        target.derivation = TargetDerivation::ScipGoStaticBinding;
+        let current = coordinator.complete(&ticket, batch).unwrap();
+        assert_eq!(current.relations[0].certainty, expected);
+        assert_eq!(
+            current.relations[0].evidence[0].derivation,
+            "scip_occurrence+go_static_dispatch+syntax_callsite"
+        );
+    }
 }
 
 #[test]

@@ -27,6 +27,9 @@ tree-sitter.workspace = true
 tree-sitter-rust.workspace = true
 scip.workspace = true
 protobuf.workspace = true
+protox-parse.workspace = true
+md5.workspace = true
+base64.workspace = true
 tiktoken-rs.workspace = true
 semweft-lang-go = { workspace = true, optional = true }
 semweft-lang-web = { workspace = true, optional = true }

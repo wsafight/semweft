@@ -1,0 +1,36 @@
+name: Semweft evidence
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked -p semweft-cli --release
+      - name: Capture and render one fixed verification report
+        env:
+          SEMWEFT_BIN: target/release/semweft
+          SEMWEFT_DIFF: ${{ github.event.pull_request.base.sha && format('{0}..HEAD', github.event.pull_request.base.sha) || 'HEAD~1..HEAD' }}
+        run: sh examples/ci/semweft-ci.sh
+      - name: Upload evidence artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: semweft-evidence
+          path: semweft-reports/
+      - name: Upload supported SARIF results
+        if: always() && hashFiles('semweft-reports/verify.sarif') != '' && github.event.pull_request.head.repo.fork != true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: semweft-reports/verify.sarif
+          category: semweft-verification

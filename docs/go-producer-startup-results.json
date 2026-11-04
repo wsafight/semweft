@@ -1,0 +1,1254 @@
+{
+  "schema_version": "0.1",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "python": "3.12.4",
+  "cpu_count": 12,
+  "jobs": 32,
+  "rounds": 2,
+  "deadline_seconds": 3,
+  "summary": {
+    "direct_script": {
+      "runs": 64,
+      "ready": 36,
+      "not_ready": 28,
+      "max_spawn_ms": 14.113,
+      "max_entry_wait_ms": 3011.917
+    },
+    "explicit_interpreter": {
+      "runs": 64,
+      "ready": 64,
+      "not_ready": 0,
+      "max_spawn_ms": 12.889,
+      "max_entry_wait_ms": 19.458
+    }
+  },
+  "observations": [
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 6.827,
+      "entry_wait_ms": 3010.71,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 10.349,
+      "entry_wait_ms": 3004.493,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 8.567,
+      "entry_wait_ms": 3010.401,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.234,
+      "entry_wait_ms": 3005.744,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 0.868,
+      "entry_wait_ms": 3004.87,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.292,
+      "entry_wait_ms": 2061.411,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 14.113,
+      "entry_wait_ms": 3008.702,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 7.968,
+      "entry_wait_ms": 3011.917,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 5.087,
+      "entry_wait_ms": 534.844,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 8.055,
+      "entry_wait_ms": 3008.122,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 10.405,
+      "entry_wait_ms": 3008.164,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.82,
+      "entry_wait_ms": 1569.413,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.706,
+      "entry_wait_ms": 3001.338,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 5.112,
+      "entry_wait_ms": 688.405,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 8.621,
+      "entry_wait_ms": 2969.704,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.105,
+      "entry_wait_ms": 2240.096,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.706,
+      "entry_wait_ms": 1779.238,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.213,
+      "entry_wait_ms": 1921.535,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.34,
+      "entry_wait_ms": 3007.175,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.862,
+      "entry_wait_ms": 842.505,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 5.618,
+      "entry_wait_ms": 1277.154,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 11.548,
+      "entry_wait_ms": 3000.325,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.423,
+      "entry_wait_ms": 2531.431,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 5.177,
+      "entry_wait_ms": 1421.606,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.699,
+      "entry_wait_ms": 3007.335,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.815,
+      "entry_wait_ms": 2672.322,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.739,
+      "entry_wait_ms": 993.272,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 13.477,
+      "entry_wait_ms": 2811.287,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 6.645,
+      "entry_wait_ms": 3002.494,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.536,
+      "entry_wait_ms": 1131.48,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.104,
+      "entry_wait_ms": 3007.386,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 8.802,
+      "entry_wait_ms": 2369.168,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.344,
+      "entry_wait_ms": 19.458,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 8.415,
+      "entry_wait_ms": 1.256,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.473,
+      "entry_wait_ms": 16.991,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 10.144,
+      "entry_wait_ms": 0.936,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.665,
+      "entry_wait_ms": 15.206,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 5.726,
+      "entry_wait_ms": 15.57,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 5.978,
+      "entry_wait_ms": 15.856,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 6.833,
+      "entry_wait_ms": 11.738,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 12.889,
+      "entry_wait_ms": 0.83,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.439,
+      "entry_wait_ms": 17.541,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.19,
+      "entry_wait_ms": 15.549,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 7.154,
+      "entry_wait_ms": 4.642,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 8.185,
+      "entry_wait_ms": 15.198,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.7,
+      "entry_wait_ms": 12.936,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 6.518,
+      "entry_wait_ms": 11.338,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.319,
+      "entry_wait_ms": 13.89,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.046,
+      "entry_wait_ms": 13.705,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 5.236,
+      "entry_wait_ms": 0.025,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.933,
+      "entry_wait_ms": 13.802,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.221,
+      "entry_wait_ms": 16.805,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.808,
+      "entry_wait_ms": 16.164,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 5.351,
+      "entry_wait_ms": 15.076,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.673,
+      "entry_wait_ms": 12.887,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 5.96,
+      "entry_wait_ms": 0.023,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.804,
+      "entry_wait_ms": 10.358,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 6.207,
+      "entry_wait_ms": 12.998,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.4,
+      "entry_wait_ms": 12.639,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.198,
+      "entry_wait_ms": 12.709,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.692,
+      "entry_wait_ms": 10.876,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.903,
+      "entry_wait_ms": 11.88,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.324,
+      "entry_wait_ms": 12.061,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.406,
+      "entry_wait_ms": 13.165,
+      "stderr": "",
+      "round": 1
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.397,
+      "entry_wait_ms": 12.242,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.108,
+      "entry_wait_ms": 16.503,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 7.935,
+      "entry_wait_ms": 0.094,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.742,
+      "entry_wait_ms": 13.033,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 5.203,
+      "entry_wait_ms": 14.611,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.791,
+      "entry_wait_ms": 17.3,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.739,
+      "entry_wait_ms": 17.15,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.464,
+      "entry_wait_ms": 13.296,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.247,
+      "entry_wait_ms": 15.934,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 6.577,
+      "entry_wait_ms": 18.565,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.159,
+      "entry_wait_ms": 14.865,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.904,
+      "entry_wait_ms": 16.192,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 5.062,
+      "entry_wait_ms": 14.861,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 5.715,
+      "entry_wait_ms": 14.402,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 8.446,
+      "entry_wait_ms": 1.318,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.302,
+      "entry_wait_ms": 14.583,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.56,
+      "entry_wait_ms": 13.956,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.893,
+      "entry_wait_ms": 14.612,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.213,
+      "entry_wait_ms": 13.482,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 7.727,
+      "entry_wait_ms": 13.011,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.638,
+      "entry_wait_ms": 12.178,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.705,
+      "entry_wait_ms": 14.329,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 5.365,
+      "entry_wait_ms": 0.016,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.488,
+      "entry_wait_ms": 12.535,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.55,
+      "entry_wait_ms": 10.625,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.872,
+      "entry_wait_ms": 12.791,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.23,
+      "entry_wait_ms": 12.624,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.877,
+      "entry_wait_ms": 12.535,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.718,
+      "entry_wait_ms": 12.057,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.634,
+      "entry_wait_ms": 13.467,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.701,
+      "entry_wait_ms": 12.524,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "explicit_interpreter",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.278,
+      "entry_wait_ms": 13.033,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.479,
+      "entry_wait_ms": 451.785,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.423,
+      "entry_wait_ms": 728.488,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.349,
+      "entry_wait_ms": 150.685,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.558,
+      "entry_wait_ms": 301.853,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.449,
+      "entry_wait_ms": 581.916,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.444,
+      "entry_wait_ms": 868.895,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.979,
+      "entry_wait_ms": 1018.979,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.351,
+      "entry_wait_ms": 1453.638,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.901,
+      "entry_wait_ms": 1306.396,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.783,
+      "entry_wait_ms": 1163.501,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.939,
+      "entry_wait_ms": 1754.183,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.009,
+      "entry_wait_ms": 1607.66,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 0.983,
+      "entry_wait_ms": 1904.823,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.033,
+      "entry_wait_ms": 2059.259,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.43,
+      "entry_wait_ms": 2957.974,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.926,
+      "entry_wait_ms": 2215.5,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.888,
+      "entry_wait_ms": 2793.488,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.216,
+      "entry_wait_ms": 3005.283,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.084,
+      "entry_wait_ms": 2378.219,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.701,
+      "entry_wait_ms": 3008.022,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": true,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.455,
+      "entry_wait_ms": 2556.652,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 4.035,
+      "entry_wait_ms": 3003.516,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 2.75,
+      "entry_wait_ms": 3000.68,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.68,
+      "entry_wait_ms": 3000.315,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.527,
+      "entry_wait_ms": 3010.522,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.964,
+      "entry_wait_ms": 3007.924,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.785,
+      "entry_wait_ms": 3001.175,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 3.333,
+      "entry_wait_ms": 3002.268,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.409,
+      "entry_wait_ms": 3010.605,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.275,
+      "entry_wait_ms": 3010.068,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.068,
+      "entry_wait_ms": 3009.371,
+      "stderr": "",
+      "round": 2
+    },
+    {
+      "mode": "direct_script",
+      "ready": false,
+      "exit_before_cleanup": null,
+      "spawn_ms": 1.005,
+      "entry_wait_ms": 3002.515,
+      "stderr": "",
+      "round": 2
+    }
+  ],
+  "date": "2026-11-04",
+  "scope": "Local macOS fixture startup investigation; no real scip-go or project build is involved.",
+  "semweft_batches": [
+    {
+      "batch": "baseline",
+      "description": "32 concurrent tests, original fixture; cleanup after failed startup could leave the producer running until its own timeout",
+      "runs": 120,
+      "outcomes": {
+        "startup_marker_timeout": 76,
+        "passed": 44
+      }
+    },
+    {
+      "batch": "trace",
+      "description": "32 concurrent tests with temporary stage logging and failure revocation cleanup",
+      "runs": 64,
+      "outcomes": {
+        "startup_marker_timeout": 15,
+        "passed": 49
+      }
+    },
+    {
+      "batch": "sampled",
+      "description": "32 concurrent tests with temporary logging, process sampling and failure revocation cleanup",
+      "runs": 32,
+      "outcomes": {
+        "passed": 16,
+        "startup_marker_timeout": 16
+      }
+    },
+    {
+      "batch": "one-worker",
+      "description": "32 concurrent tests with logging and sampling; TOKIO_WORKER_THREADS=1 control",
+      "runs": 64,
+      "outcomes": {
+        "passed": 23,
+        "startup_marker_timeout": 41
+      }
+    }
+  ],
+  "sample_evidence": [
+    {
+      "pid": 45556,
+      "source_sha256": "376f0346bff6310ae810383c37dcf58ebc926be0d272b552edc1b5da1fb6e41f",
+      "launch_time": "2026-11-04 13:19:59.691 +0800",
+      "sample_time": "2026-11-04 13:20:02.652 +0800",
+      "frames": [
+        "903 Thread_60930388: Main Thread DispatchQueue_<multiple>",
+        "903 _dyld_start (in dyld) + 0"
+      ],
+      "samples": 903,
+      "interpretation": "The user script had not written its first builtin marker at the deadline; the sampled instruction pointer remained at the loader entry."
+    },
+    {
+      "pid": 44847,
+      "source_sha256": "833764965053744d93579ec98a5fe5a726c5024c27188ba5fb048a34c2f1d9b1",
+      "launch_time": "2026-11-04 13:19:59.516 +0800",
+      "sample_time": "2026-11-04 13:20:02.615 +0800",
+      "frames": [
+        "382 _dyld_start (in dyld) + 0",
+        "dyld4::ExternallyViewableState::triggerNotifications",
+        "dyld4::RemoteNotificationResponder::blockOnSynchronousEvent",
+        "dyld4::RemoteNotificationResponder::sendMessage",
+        "mach_msg2_trap"
+      ],
+      "interpretation": "A second sample also observed loader synchronous notification frames. This does not identify the service responsible for the delay."
+    }
+  ],
+  "limitations": [
+    "Startup wait observations that reached the deadline are right-censored; they do not measure the eventual entry time.",
+    "The specific macOS service or observer responsible for the loader wait was not identified.",
+    "These are local fixture and minimal shell reproductions, not measurements of real scip-go or of other operating systems.",
+    "The Tokio worker-count experiment did not eliminate the failure; batches differ in tracing and sampling overhead and cannot be compared as a controlled throughput benchmark.",
+    "Temporary runtime tracing and automatic process sampling were removed from the final code."
+  ]
+}

@@ -9,6 +9,8 @@ pub enum Format {
     Json,
     Text,
     Markdown,
+    Sarif,
+    Html,
     Mermaid,
     Dot,
 }
@@ -32,6 +34,18 @@ pub fn render(
     max_chars: Option<usize>,
     gaps_all: bool,
 ) -> Result<String> {
+    if matches!(format, Format::Html) {
+        if max_chars.is_some() {
+            bail!("invalid_argument: HTML cannot be clipped with max_chars");
+        }
+        return crate::reports::html(value);
+    }
+    if matches!(format, Format::Sarif) {
+        if max_chars.is_some() {
+            bail!("invalid_argument: SARIF cannot be clipped with max_chars");
+        }
+        return crate::reports::sarif(value);
+    }
     if matches!(format, Format::Json) {
         return Ok(if value.get("token_count").is_some() {
             serde_json::to_string(value)?
@@ -82,7 +96,125 @@ pub fn render(
                 .unwrap_or_default()
         )?;
     }
+    if let Some(verification) = value.get("verification") {
+        writeln!(
+            out,
+            "核验状态：{} | findings（全量）：{} | 违规：{} | 警告：{}",
+            verification["status"].as_str().unwrap_or("unknown"),
+            verification["finding_count"],
+            verification["violation_count"],
+            verification["warning_count"]
+        )?;
+    }
+    if let Some(summary) = value.get("test_summary") {
+        writeln!(
+            out,
+            "测试候选（全量）：{} | 当前版本：{} | 当前版本非 ignored：{} | 仅旧版本：{} | ignored：{}",
+            summary["candidate_count"],
+            summary["head_candidates"],
+            summary["head_nonignored_candidates"],
+            summary["base_only_candidates"],
+            summary["ignored_candidates"]
+        )?;
+        writeln!(
+            out,
+            "覆盖信息：不可用 | 已执行测试：false | 关系遍历完成：{}",
+            summary["traversal_complete"]
+        )?;
+    }
+    if let Some(summary) = value.get("diff_summary") {
+        writeln!(
+            out,
+            "Diff（全量）：变更符号 {} | 配置 {} | 残留引用 {} | 已观察文件模块 {} | 模块聚合完成 {} | {}",
+            summary["changed_symbols"],
+            summary["configuration_changes"],
+            summary["residual_references"],
+            summary["affected_modules_observed"],
+            summary["module_aggregation_complete"],
+            summary["analysis_basis"].as_str().unwrap_or("unknown")
+        )?;
+    }
     let header_len = out.len();
+    if value.get("test_summary").is_some() {
+        heading(&mut out, "测试候选推荐（当前页）", markdown)?;
+        writeln!(
+            out,
+            "依据已索引调用/引用路径推荐，未确认构建或运行可用性；零候选不表示无需测试。仅识别 Rust test、tokio::test、async_std::test 属性入口。"
+        )?;
+        for candidate in value["test_candidates"].as_array().into_iter().flatten() {
+            writeln!(
+                out,
+                "\n- {} — {} | {} | ignored {} | candidate | snapshot {}",
+                label(&candidate["test"]),
+                location(&candidate["test"]["location"]),
+                candidate["availability"].as_str().unwrap_or("?"),
+                candidate["ignored"],
+                candidate["test_snapshot"]["snapshot_id"]
+                    .as_str()
+                    .unwrap_or("?")
+            )?;
+            for witness in candidate["witnesses"].as_array().into_iter().flatten() {
+                writeln!(
+                    out,
+                    "  依据：{} | side {} | target {} | 路径绑定 {}",
+                    witness["reason"].as_str().unwrap_or("?"),
+                    witness["side"].as_str().unwrap_or("?"),
+                    witness["target_symbol_id"].as_str().unwrap_or("?"),
+                    witness["path_certainty"]
+                        .as_str()
+                        .unwrap_or("not_applicable")
+                )?;
+                for relation in witness["path"].as_array().into_iter().flatten() {
+                    edge(&mut out, relation)?;
+                }
+            }
+        }
+    }
+    if let Some(verification) = value.get("verification") {
+        heading(&mut out, "修改核验", markdown)?;
+        writeln!(
+            out,
+            "范围：已安装的内置审查规则；不执行编译或测试。状态与规则计数为分页前全量结果。"
+        )?;
+        for rule in verification["rules"].as_array().into_iter().flatten() {
+            writeln!(
+                out,
+                "- {}@{}: {}（{} 条 finding）",
+                rule["id"].as_str().unwrap_or("?"),
+                rule["version"].as_str().unwrap_or("?"),
+                rule["status"].as_str().unwrap_or("unknown"),
+                rule["finding_count"]
+            )?;
+        }
+        heading(&mut out, "核验 findings（当前页）", markdown)?;
+        for finding in value["findings"].as_array().into_iter().flatten() {
+            writeln!(
+                out,
+                "- [{} / {}] {}@{}: {}",
+                finding["severity"].as_str().unwrap_or("?"),
+                finding["status"].as_str().unwrap_or("?"),
+                finding["rule_id"].as_str().unwrap_or("?"),
+                finding["rule_version"].as_str().unwrap_or("?"),
+                finding["message"].as_str().unwrap_or("")
+            )?;
+            let evidence = &finding["evidence"];
+            if let Some(file) = evidence["file"].as_str() {
+                writeln!(out, "  证据：{file}")?;
+            }
+            if evidence.get("location").is_some() {
+                writeln!(
+                    out,
+                    "  证据：{} | side {} | certainty {}",
+                    location(&evidence["location"]),
+                    evidence["side"].as_str().unwrap_or("head"),
+                    evidence["certainty"].as_str().unwrap_or("unknown")
+                )?;
+            }
+            if let Some(relation) = evidence["relation_id"].as_str() {
+                writeln!(out, "  relation_id: {relation}")?;
+            }
+        }
+    }
     if value.get("evidence_summary").is_some() {
         writeln!(
             out,
@@ -123,8 +255,148 @@ pub fn render(
             writeln!(out, "- parse failed: {}", file.as_str().unwrap_or("?"))?;
         }
     }
+    if let Some(summary) = value.get("path_summary") {
+        heading(&mut out, "调用路径", markdown)?;
+        writeln!(
+            out,
+            "{} → {} | 已找到 {} 条 | 枚举完成：{} | 访问节点：{}",
+            label(&value["from"]),
+            label(&value["to"]),
+            summary["path_count"],
+            summary["enumeration_complete"],
+            summary["visited_nodes"]
+        )?;
+        writeln!(
+            out,
+            "范围：{}；按简单路径枚举，路径中的 candidate 证据仍为候选。",
+            summary["scope"].as_str().unwrap_or("indexed symbol calls")
+        )?;
+        writeln!(
+            out,
+            "限制：深度 {}，路径 {}，节点 {}。枚举完成仅针对已索引图，分析缺口仍见 completeness。",
+            summary["max_depth"], summary["max_paths"], summary["max_nodes"]
+        )?;
+        if let Some(reason) = summary["reason"].as_str() {
+            writeln!(
+                out,
+                "路径枚举截断：{reason}；未找到路径不能据此证明两端无关系。"
+            )?;
+        }
+        if let Some(interpretation) = summary["interpretation"].as_str() {
+            writeln!(out, "{interpretation}")?;
+        }
+        for path in value["paths"].as_array().into_iter().flatten() {
+            let nodes = path
+                .get("symbols")
+                .or_else(|| path.get("nodes"))
+                .unwrap_or(&Value::Null);
+            let names = nodes
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(label)
+                .collect::<Vec<_>>();
+            writeln!(
+                out,
+                "\n{} [{} {}] | {} 步 | {}",
+                names.join(" → "),
+                path["certainty"].as_str().unwrap_or("?"),
+                path["freshness"].as_str().unwrap_or("?"),
+                path["length"],
+                path["path_id"].as_str().unwrap_or("?")
+            )?;
+            for relation in path["relations"].as_array().into_iter().flatten() {
+                edge(&mut out, relation)?;
+            }
+        }
+    }
     let impact = value.get("changes").is_some();
     if impact {
+        if let Some(summary) = value.get("risk_summary") {
+            heading(&mut out, "风险审查信号（全量）", markdown)?;
+            let score = summary["score"]
+                .as_u64()
+                .map(|score| {
+                    format!(
+                        "{score}/100（{}，启发式；置信度 {}）",
+                        summary["level"].as_str().unwrap_or("?"),
+                        summary["confidence"].as_str().unwrap_or("?")
+                    )
+                })
+                .unwrap_or_else(|| "未提供".into());
+            writeln!(
+                out,
+                "风险评分：{score} | 行覆盖观测：{} | 热点历史：{} | 逐测试归因不可用、外部消费者未纳入；分数仅用于审查优先级。",
+                summary["dimensions"]["test_coverage"]["status"]
+                    .as_str()
+                    .unwrap_or("unavailable"),
+                summary["dimensions"]["hotspot"]["status"]
+                    .as_str()
+                    .unwrap_or("unavailable")
+            )?;
+            for (key, label) in [
+                ("impact_scope", "影响范围"),
+                ("public_api", "公开声明"),
+                ("call_impact", "调用影响"),
+                ("test_coverage", "行覆盖观测"),
+                ("hotspot", "历史热点"),
+                ("evidence_gaps", "证据缺口"),
+            ] {
+                let dimension = &summary["dimensions"][key];
+                if !dimension["score"].is_number() {
+                    continue;
+                }
+                let observation = match key {
+                    "test_coverage" => format!(
+                        "报告行 {}、命中 {}、缺少观测声明 {}",
+                        dimension["observed_lines"],
+                        dimension["covered_lines"],
+                        dimension["declarations_without_line_observations"]
+                    ),
+                    "hotspot" => format!(
+                        "最大窗口触及提交 {}/{}、来源 {}",
+                        dimension["max_window_changes"],
+                        dimension["max_window_commits"],
+                        dimension["max_frequency_source"]
+                    ),
+                    _ => String::new(),
+                };
+                writeln!(
+                    out,
+                    "- {label}: {}/{} {observation}",
+                    dimension["score"], dimension["max_score"]
+                )?;
+            }
+            for signal in summary["signals"].as_array().into_iter().flatten() {
+                writeln!(
+                    out,
+                    "- {}: {} — {}",
+                    signal["kind"].as_str().unwrap_or("?"),
+                    signal["observed_count"],
+                    signal["reason"].as_str().unwrap_or("")
+                )?;
+            }
+        }
+        if value.get("affected_modules").is_some() {
+            heading(&mut out, "受影响文件模块（当前页）", markdown)?;
+            writeln!(
+                out,
+                "按源文件聚合，base/head 分别计数；未展开内联模块或服务。"
+            )?;
+            for module in value["affected_modules"].as_array().into_iter().flatten() {
+                writeln!(
+                    out,
+                    "- {} | {} | crate {} | 变更符号 {} | 影响符号 {} | 关系 {} | 残留引用 {}",
+                    module["path"].as_str().unwrap_or("?"),
+                    module["side"].as_str().unwrap_or("?"),
+                    module["crate"].as_str().unwrap_or("unknown"),
+                    module["changed_symbol_ids"].as_array().map_or(0, Vec::len),
+                    module["affected_symbol_ids"].as_array().map_or(0, Vec::len),
+                    module["relation_ids"].as_array().map_or(0, Vec::len),
+                    module["residual_reference_count"]
+                )?;
+            }
+        }
         heading(&mut out, "摘要", markdown)?;
         writeln!(
             out,
@@ -161,6 +433,101 @@ pub fn render(
             writeln!(out, "\n{body}")?;
         }
     }
+    if let Some(review) = value
+        .get("review")
+        .or_else(|| value.get("review_id").map(|_| value))
+    {
+        heading(&mut out, "人工审查记录", markdown)?;
+        writeln!(
+            out,
+            "{} | 结论 {} | 批准适用于当前视图 {}",
+            review["review_id"].as_str().unwrap_or("?"),
+            review["conclusion"].as_str().unwrap_or("?"),
+            review["validity"]["approval_applies"]
+        )?;
+        writeln!(out, "{}", review["note"].as_str().unwrap_or(""))?;
+    }
+    if let Some(summary) = value.get("contract_summary") {
+        heading(&mut out, "Protobuf 契约影响", markdown)?;
+        writeln!(
+            out,
+            "变更 {} | 生成映射候选 {} | {}",
+            summary["change_count"],
+            summary["mapping_count"],
+            summary["compatibility_scope"]
+                .as_str()
+                .unwrap_or("limited scope")
+        )?;
+        for change in value["contract_changes"].as_array().into_iter().flatten() {
+            writeln!(
+                out,
+                "- {} [{}] {}",
+                change["contract_id"].as_str().unwrap_or("?"),
+                change["kind"].as_str().unwrap_or("?"),
+                change["file"].as_str().unwrap_or("?")
+            )?;
+        }
+        for impact in value["contract_impacts"].as_array().into_iter().flatten() {
+            writeln!(
+                out,
+                "- {} → {} [{} / {}]",
+                impact["contract_id"].as_str().unwrap_or("?"),
+                label(&impact["symbol"]),
+                impact["side"].as_str().unwrap_or("?"),
+                impact["impact_level"].as_str().unwrap_or("candidate")
+            )?;
+            for relation in impact["relations"].as_array().into_iter().flatten() {
+                edge(&mut out, relation)?;
+            }
+        }
+    }
+    if let Some(architecture) = value.get("architecture") {
+        heading(&mut out, "架构分层检查", markdown)?;
+        writeln!(
+            out,
+            "新增 {} | 历史 {} | 规则 {} | 比较 {}",
+            architecture["new_count"],
+            architecture["existing_count"],
+            architecture["rules_digest"].as_str().unwrap_or("?"),
+            architecture["comparison"].as_str().unwrap_or("none")
+        )?;
+    }
+    if let Some(observation) = value["guard"].get("risk_observations") {
+        heading(&mut out, "修改前覆盖与热点观测", markdown)?;
+        writeln!(
+            out,
+            "覆盖 {}：观测 {} 行，覆盖 {} 行；热点 {}：窗口内最高 {}/{} 次提交。未执行测试。",
+            observation["coverage"]["status"]
+                .as_str()
+                .unwrap_or("unavailable"),
+            observation["coverage"]["observed_lines"],
+            observation["coverage"]["covered_lines"],
+            observation["hotspots"]["status"]
+                .as_str()
+                .unwrap_or("unavailable"),
+            observation["hotspots"]["max_window_changes"],
+            observation["hotspots"]["max_window_commits"]
+        )?;
+    }
+    if let Some(api) = value.get("api_summary") {
+        heading(&mut out, "公开声明清单", markdown)?;
+        if api["external_reachability"] == "candidate" {
+            writeln!(
+                out,
+                "Rust 库 API 候选 {} 个，导出路径 {} 条；已展开捕获的模块与本地重导出，条件编译未求值，需编译器确认。",
+                api["declaration_count"], api["export_path_count"]
+            )?;
+            for gap in api["known_gaps"].as_array().into_iter().flatten() {
+                writeln!(out, "- API 缺口：{}", gap.as_str().unwrap_or("unknown"))?;
+            }
+        } else {
+            writeln!(
+                out,
+                "语法公开声明 {} 个；外部可达性未确认，未展开重导出和生成物。",
+                api["declaration_count"]
+            )?;
+        }
+    }
     if let Some(symbols) = value["symbols"].as_array() {
         for s in symbols {
             writeln!(
@@ -169,6 +536,77 @@ pub fn render(
                 label(s),
                 s["kind"].as_str().unwrap_or("?"),
                 location(&s["location"])
+            )?;
+            for export in s["api_exposure"]["paths"].as_array().into_iter().flatten() {
+                writeln!(
+                    out,
+                    "  API: {}{}",
+                    export["path"].as_str().unwrap_or("?"),
+                    if export["conditional"] == true {
+                        " (条件候选)"
+                    } else {
+                        " (候选)"
+                    }
+                )?;
+            }
+        }
+    }
+    if let Some(summary) = value.get("api_surface_summary") {
+        heading(&mut out, "外部 API 候选变更", markdown)?;
+        writeln!(
+            out,
+            "{} 条路径变更；基于冻结 Rust 库模块/重导出图，不判定兼容性。",
+            summary["change_count"]
+        )?;
+        for change in value["api_changes"].as_array().into_iter().flatten() {
+            writeln!(
+                out,
+                "- {}: {}",
+                change["kind"].as_str().unwrap_or("?"),
+                change["path"].as_str().unwrap_or("?")
+            )?;
+        }
+    }
+    if let Some(summary) = value.get("cycle_summary") {
+        heading(&mut out, "循环依赖（候选图）", markdown)?;
+        writeln!(
+            out,
+            "强连通分量 {} 个；依赖范围 {}，未索引依赖不纳入结论。",
+            summary["component_count"],
+            summary["dependency_kind"].as_str().unwrap_or("unknown")
+        )?;
+        for cycle in value["cycles"].as_array().into_iter().flatten() {
+            let nodes = cycle["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
+            writeln!(
+                out,
+                "- {} [{}]",
+                nodes.join(" ↔ "),
+                cycle["certainty"].as_str().unwrap_or("candidate")
+            )?;
+        }
+    }
+    if let Some(summary) = value.get("service_impact_summary") {
+        heading(&mut out, "服务影响（显式映射）", markdown)?;
+        writeln!(
+            out,
+            "观察到 {} 个受影响服务；只聚合已捕获文件与索引关系。",
+            summary["affected_services_observed"]
+        )?;
+        for service in value["affected_services"].as_array().into_iter().flatten() {
+            writeln!(
+                out,
+                "- {} ({}): {} 个文件，{} 个候选符号",
+                service["name"].as_str().unwrap_or("?"),
+                service["side"].as_str().unwrap_or("head"),
+                service["files"].as_array().map_or(0, Vec::len),
+                service["affected_symbol_ids"]
+                    .as_array()
+                    .map_or(0, Vec::len)
             )?;
         }
     }
@@ -678,6 +1116,26 @@ mod tests {
             "summary":{"direct_callers":1,"transitive_callers":2},
             "snapshots":{"base":{"snapshot_id":"base"},"head":{"snapshot_id":"head"}}
         })
+    }
+
+    #[test]
+    fn verification_reports_verdict_rules_and_evidence_in_all_human_formats() {
+        let mut value = impact();
+        value["verification"] = json!({"status":"insufficient_evidence","finding_count":8,"violation_count":0,"warning_count":8,
+            "rules":[{"id":"residual_reference_requires_review","version":"0.1","status":"insufficient_evidence","finding_count":8}]});
+        value["findings"] = json!([{"rule_id":"residual_reference_requires_review","rule_version":"0.1",
+            "severity":"warning","status":"insufficient_evidence","message":"Review old-name binding",
+            "evidence":{"certainty":"candidate","location":{"file":"src/lib.rs","line":3,"column":4}}}]);
+        for format in [Format::Text, Format::Markdown] {
+            let report = render(&value, format, None, false).unwrap();
+            assert!(report.contains("核验状态：insufficient_evidence"));
+            assert!(report.contains("findings（全量）：8"));
+            assert!(report.contains("residual_reference_requires_review@0.1"));
+            assert!(report.contains("src/lib.rs:3:4"));
+            let cropped = render(&value, format, Some(600), false).unwrap();
+            assert!(cropped.contains("核验状态：insufficient_evidence"));
+            assert!(cropped.contains("输出已裁剪"));
+        }
     }
 
     #[test]

@@ -8,7 +8,10 @@ pub struct Frontends {
 }
 pub fn version() -> String {
     #[allow(unused_mut, clippy::useless_vec)]
-    let mut versions = vec![semweft_lang_rust::PARSER_VERSION];
+    let mut versions = vec![
+        semweft_lang_rust::PARSER_VERSION,
+        crate::scip::ADAPTER_VERSION,
+    ];
     #[cfg(feature = "go-experimental")]
     versions.push(semweft_lang_go::PARSER_VERSION);
     #[cfg(feature = "web-experimental")]

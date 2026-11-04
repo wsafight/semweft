@@ -8,14 +8,14 @@
 
 下表是产品能力地图，首版范围见下一张交付表。P0 为首版查询闭环必需能力；P1 为后续语言、规则和团队扩展；P2 为按验证结果排期的增强能力。具体交付以[路线图](roadmap.md)第 1 节为准，分析承诺共用[证据模型](evidence-model.md)第 2.3 节；能力清单披露实际支持状态。
 
-当前 v0.2 增量只增加 Rust `find_implementations` / `semweft impls`，工具总数为 11；`verify_change` 尚未接入。下文其余 v0.2 及后续版本内容继续表示规划，不能视为本次增量已交付。
+当前已接入 Rust 实现查询、diff 核验、符号调用路径、Rust 测试候选、CI 报告、实验性风险评分、公开声明清单与循环检测；另接入分层/基线、前后 Agent 护栏、保护区域、Hooks 适配、审查归档、静态 HTML 和 Protobuf 首版。MCP 工具共 19 个。详细范围见 [清单](product-next.md)、[护栏指南](guardrails.md)与 [契约分析](contracts.md)。核验、语义关系和正式语言验收的限制仍适用；下文未明确接入的内容继续表示规划。
 
 |编号|模块|核心能力|优先级|
 |---|---|---|---|
 |A|代码摄取与索引|语法与语义证据、依赖失效和增量刷新；多语言、多仓库逐步扩展|P0|
 |B|符号与导航|定义、引用、符号大纲；本次增加 Rust trait 实现查询，其他实现与类型层级后续增加|P0|
-|C|调用图与依赖图|受限调用关系、模块和包依赖；路径查询、框架入口与循环检测后续增加|P0|
-|D|变更影响分析|候选影响范围、证据报告；后续增加测试候选、风险评分和限定规则核验|P0|
+|C|调用图与依赖图|受限调用关系、符号间调用路径、模块和包依赖；框架入口与循环检测后续增加|P0|
+|D|变更影响分析|候选影响范围、证据报告、测试候选、内置审查规则核验和实验性启发式风险评分；后续增加签名兼容规则|P0|
 |E|Agent 上下文引擎|上下文包、Token 预算、结构地图；语义检索与增量上下文后续增加|P0|
 |F|架构治理|分层规则、边界检查、架构漂移、死代码|P1|
 |G|代码度量与热点|复杂度、耦合度、变更频率、所有权、技术债|P1|
@@ -37,9 +37,9 @@
 |受限调用图|调用方与被调方，受深度、节点数和耗时上限约束|call_graph；semweft calls|
 |候选影响|符号与 diff 的候选影响及证据路径，JSON/Markdown 报告|impact_of；semweft impact|
 |上下文|结构地图含 Cargo bin/lib 目标与可定位的 main；按 Token 预算裁剪上下文包，含目标项目的已声明配置|repo_map、context_pack；semweft map、semweft context|
-|人工可读输出|查询命令支持 text 与 Markdown；map 的人工视图；模块与包依赖图导出 Mermaid/DOT；impact Markdown 报告固定段落结构，见下方“人工可读输出”|--format；semweft map、semweft impact|
+|人工可读输出|查询命令支持 text 与 Markdown；map 的人工视图；模块与包依赖图导出 Mermaid/DOT；impact Markdown 报告固定段落结构；CI 离线核验报告支持 Markdown/SARIF|--format；semweft map、semweft impact、semweft report|
 |接口|MCP stdio 桥接与 CLI；本地 Streamable HTTP MCP 后续评估|semweft mcp|
-|不包含|verify、测试候选、GUI、静态 HTML 报告（v0.3）、IDL、BM25 全文检索与向量检索、高级图查询、TUI；Go 仅实验|—|
+|不包含|GUI、静态 HTML 报告（v0.3）、IDL、BM25 全文检索与向量检索、高级图查询、TUI；Go 仅实验。verify、测试候选、CI 报告是后续增量，范围按本文件各节说明|—|
 
 **人工可读输出（v0.1）**
 
@@ -83,7 +83,7 @@
 |符号大纲|文件、模块、包级别的结构摘要，只含签名和文档注释，不含函数体|P0|
 |签名与文档|首版返回签名、注释、可见性和所属模块；所有权随 Git/CODEOWNERS 适配增加|P0|
 |字段读写分析|某个结构体字段在哪里被读、在哪里被写|P1|
-|公共 API 清单|列出声明构建配置下已解析的公开 API，并披露条件编译和生成物缺口；v0.2 起作为符号搜索的可见性过滤提供|P1|
+|公共 API 清单|已接入 search --visibility public、路径/类型过滤和固定分页；仅按语法公开性列声明，不把私有父模块、重导出、条件编译和生成物缺口伪装为外部可达 API|P1|
 
 `semweft impls <trait-or-trait-method> --path <prefix>` 对应 `find_implementations`，支持来源、确定性、新鲜度、固定快照和游标参数；非 trait / trait_method 目标返回参数错误。trait 模式列 impl（包括标记 trait 和空 impl），方法模式只为显式覆盖生成 `kind=implements` 关系，未覆盖的默认方法通过 `inherited_defaults` 单独计数。`scope=production/test` 供 text / Markdown 分组：impl 与默认方法继承以 `block.test_only` 为准，显式方法使用 `test_scope()`，不能因单个测试方法把生产 impl 归为 test；它不表示测试已执行或足以验证实现。
 
@@ -98,12 +98,12 @@
 |功能|说明|优先级|
 |---|---|---|
 |调用方和被调方|受深度、节点数和耗时上限约束的调用关系，可按来源、确定性、模块过滤|P0|
-|路径查询|按 max_depth、max_paths、max_nodes 和 timeout 返回有限路径；标明截断和环的处理，默认枚举简单路径|P1|
+|路径查询|已接入符号调用路径与文件模块/显式服务聚合路径；按深度/路径/节点/超时限制简单路径，逐跳保留调用证据与截断；聚合路径不保证连续执行链|P1|
 |基本入口与目标识别|v0.1 识别 Cargo bin/lib 目标及可定位的 main；lib 标为库目标|P0|
 |框架入口识别|HTTP 路由、RPC handler、消息消费者、定时任务、框架 CLI 命令等随适配器分项增加|P1|
 |模块和包依赖图|首版返回已索引模块与包的结构依赖；交互折叠和其他粒度后续扩展|P0|
 |第三方依赖分析|哪些代码用到了某个第三方库的哪些 API，评估升级或替换成本|P1|
-|循环依赖检测|v0.2 起检查已索引 crate 与模块依赖中的环，服务级后续增加；切断建议属于推断|P1|
+|循环依赖检测|已接入 map --cycles：crate/文件模块/显式服务依赖强连通分量、逐边证据、固定分页；候选边生成候选环，网络依赖与切断建议不自动推断|P1|
 |动态分发展开|trait object、interface、函数指针调用给出候选实现集合，并标注为 candidate|P1|
 |异步与并发链路|跨 spawn、channel、goroutine、消息队列的逻辑调用关系|P2|
 
@@ -116,11 +116,11 @@
 |符号级影响范围|输入符号，输出经引用或调用关系推导的候选影响与证据路径；服务维度随本文模块 H 增加|P0|
 |Diff 级影响分析|输入 base/head 或 PR，识别两侧变更符号及变更类型，按下方变更模型分别在 base、head 上计算影响范围|P0|
 |签名变更检测|v0.2 起按语言和构建配置检查明确的 API 变化；兼容性规则逐项定义|P1|
-|受影响测试候选|结合调用图或逐测试覆盖率建议测试，附映射范围与缺口；与项目完整测试策略结合使用|P1|
-|限定规则核验|v0.2 起检查明确的签名或依赖规则，列出 findings、未检查项及证据不足|P1|
-|风险评分|综合影响范围、调用方数量、热点程度、测试覆盖、所有者数量给出风险等级|P1|
+|受影响测试候选|已接入反向调用/引用路径与显式 Rust 测试属性识别，附完整路径、ignored/base_only 标记与缺口；逐测试覆盖率与自定义入口后续增加|P0|
+|限定规则核验|已接入四条内置审查规则，列出 findings 与逐规则状态；签名兼容、自定义规则及依赖策略后续增加|P0|
+|风险评分|基于影响范围、语法公开声明、调用深度、可选快照绑定 LCOV 行覆盖与冻结 Git 热点、证据缺口的 0–100 审查优先级启发式；缺失输入显式披露，不执行测试、无逐测试归因，所有者维度待接入|P1|
 |评审建议|根据所有权信息推荐需要参与评审的人或团队|P1|
-|影响报告|首版提供 JSON/Markdown 证据报告，Markdown 段落结构见第 1 节“人工可读输出”；v0.2 增加适合规则发现的 SARIF 与 CI 集成；v0.3 增加自包含的静态 HTML 报告|P0|
+|影响报告|首版提供 JSON/Markdown 证据报告，Markdown 段落结构见第 1 节“人工可读输出”；CI 增量为全分页 JSON、核验 findings 的 SARIF 与 GitHub/GitLab 示例；v0.3 增加自包含的静态 HTML 报告|P0|
 
 **Diff 变更模型（v0.1）**：
 
@@ -139,6 +139,19 @@
 - **降级**：base 缺少 L3 索引时，先尝试 CI 共享索引或为 base 建立索引；仍不可用时只给已实现的 L1/L2 结果（v0.1 仅 L1），并列入 known_gaps，不拿 head 图代替 base
 
 - **响应**：changes 中每项列出变更类型、两侧符号、匹配方式和查询所用的快照，影响关系标明来自哪一侧
+
+**Diff 报告增量**：已增加分页前全量变更统计、双侧受影响文件模块与显式服务、符号/关系证据索引、残留引用计数和风险审查信号。模块以源文件聚合，尚不展开内联模块；服务使用快照冻结的显式映射，见[服务映射](services.md)。module_aggregation_complete 仅表示聚合已计算证据完成。风险评分采用 `heuristic_v2`，分项权重与观测量见接口规格；可导入绑定源码哈希的 LCOV 行观测与显式 Git 历史窗口，见[风险输入指南](risk-inputs.md)。它是审查优先级而非概率，尚未用标注任务校准，不自动执行测试或关联单个测试，外部消费者不纳入。公开声明信号不构成可达 API 或兼容性判断。关系增减和残留位置显式附 side，受限结果的重查参数固定原双侧版本。
+
+**首版修改核验**：`semweft verify --diff <selector>` / `verify_change` 在分页前对同一份 diff 影响结果运行以下内置规则，版本均为 `0.1`：
+
+|规则|触发条件|结果|
+|---|---|---|
+|configuration_change_requires_review|纳入 manifest 的构建或分析配置变化|每个配置文件一个 warning，要求审查配置对未变声明的影响|
+|impact_analysis_incomplete|known_gaps、pending、未满足新鲜度、非完整分析范围或深度/节点/时间限制|一个 warning，附完整性、两侧新鲜度和截断证据|
+|residual_reference_requires_review|删除、重命名或移动后，head 仍有旧名称出现|每个残留引用一个 warning，保留 L1 candidate 与位置|
+|candidate_impact_requires_review|base/head 影响图包含关系|每条关系一个 warning，保留 side、路径和全部证据；即使绑定为 definite，也不能证明调用方必须修改|
+
+每条规则返回 `no_violations_found` 或 `insufficient_evidence`。整体契约也支持 `violations_found`，但首版规则没有产生确定违规的条件。`verification` 的规则版本、全量状态和计数随每页重复；`findings`、关系及关系增减列表共用单页 limit。当前索引披露 L1 名称绑定缺口，因此通常为证据不足；候选不提升为确定违规。此命令不执行编译或测试，附带 diff 的实验性风险评分；自定义规则、架构规则与保护区域另行接入。
 
 ### E. Agent 上下文引擎
 
