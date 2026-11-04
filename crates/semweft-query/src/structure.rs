@@ -508,9 +508,21 @@ fn health(stored: &StoredView, relations: &[Relation], deadline: Instant) -> Res
             unresolved.push(o);
         }
     }
+    // Full diagnostic detail lives here; query responses carry only counted samples.
+    let diagnostics_all = facts.diagnostics.iter().chain(stored.reference_gaps.iter());
+    let mut diagnostic_counts = BTreeMap::<&str, usize>::new();
+    for d in diagnostics_all.clone() {
+        *diagnostic_counts.entry(d.code.as_str()).or_default() += 1;
+    }
+    let diagnostic_total = diagnostic_counts.values().sum::<usize>();
+    let diagnostics = diagnostics_all
+        .take(1000)
+        .map(|d| json!({"kind":d.code,"file":d.file,"reason":d.message}))
+        .collect::<Vec<_>>();
+    let omitted_diagnostics = diagnostic_total.saturating_sub(diagnostics.len());
     Ok(
         json!({"source_files":parsed,"parse_failed_files":failed,"syntax_symbols":facts.symbols.len(),"syntax_calls":facts.calls.len(),
         "unresolved_occurrence_count":unresolved.len(),"unresolved_occurrences":unresolved.iter().take(1000).map(|o|json!({"name":o.name,"kind":o.kind,"file":o.file,"span":o.span,"reason":"No current semantic binding was captured for this occurrence; local names and external symbols may be outside the model"})).collect::<Vec<_>>(),
-        "omitted_unresolved_occurrences":unresolved.len().saturating_sub(1000),"evidence_summary":query::summary(relations,"complete")}),
+        "omitted_unresolved_occurrences":unresolved.len().saturating_sub(1000),"evidence_summary":query::summary(relations,"complete"),"diagnostic_counts":diagnostic_counts,"diagnostics":diagnostics,"omitted_diagnostics":omitted_diagnostics}),
     )
 }

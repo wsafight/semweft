@@ -28,7 +28,8 @@ pub struct StoredView {
     pub references: Arc<Vec<Relation>>,
     pub reference_gaps: Arc<Vec<Diagnostic>>,
     pub namespaces: Arc<BTreeMap<String, String>>,
-    index: Arc<OnceLock<IndexedView>>,
+    index: Arc<OnceLock<crate::query_index::QueryIndex>>,
+    full: Arc<OnceLock<IndexedView>>,
     api_surface: Arc<OnceLock<crate::api_surface::Inventory>>,
     weight: Arc<AtomicUsize>,
     deriver: Arc<Mutex<RelationDeriver>>,
@@ -95,6 +96,7 @@ impl StoredView {
             reference_gaps: Arc::new(reference_gaps),
             namespaces: Arc::new(namespaces),
             index: Arc::new(OnceLock::new()),
+            full: Arc::new(OnceLock::new()),
             api_surface: Arc::new(OnceLock::new()),
             weight: Arc::new(AtomicUsize::new(weight)),
             deriver: Arc::new(Mutex::new(RelationDeriver::default())),
@@ -106,8 +108,31 @@ impl StoredView {
         self
     }
 
-    pub fn index(&self) -> &IndexedView {
+    /// Per-query index: symbol, location and adjacency lookups derive the syntax
+    /// edges they need instead of holding all of them.
+    pub fn index(&self) -> &crate::query_index::QueryIndex {
         self.index.get_or_init(|| {
+            let indexer = self
+                .view
+                .snapshot
+                .manifest
+                .analysis_versions
+                .get("syntax")
+                .cloned()
+                .unwrap_or_else(crate::frontend::version);
+            let explicit =
+                merge_layers(vec![], self, || Ok(())).expect("infallible relation merge");
+            let index = crate::query_index::QueryIndex::new(self.view.clone(), explicit, &indexer);
+            self.weight
+                .fetch_add(index.estimated_heap_bytes(), Ordering::Relaxed);
+            index
+        })
+    }
+
+    /// Every relation, materialized once. Only whole-graph scans and lookups of
+    /// an arbitrary relation id need this; point queries use `index()`.
+    pub fn full_index(&self) -> &IndexedView {
+        self.full.get_or_init(|| {
             let index = IndexedView::new(self.view.clone(), merged_relations(self));
             self.weight
                 .fetch_add(index.estimated_heap_bytes(), Ordering::Relaxed);
@@ -1475,7 +1500,9 @@ impl RelationDeriver {
         }
         self.files
             .retain(|file, _| groups.contains_key(file.as_str()));
-        let mut result = BTreeMap::new();
+        // Per-file vectors are cached behind Arc; relation ids include the file,
+        // so they never collide across files and need no keyed map.
+        let mut held: Vec<Arc<Vec<Relation>>> = Vec::new();
         for (file, occurrences) in groups {
             check()?;
             let names: BTreeSet<_> = occurrences.iter().map(|o| o.name.as_str()).collect();
@@ -1493,15 +1520,15 @@ impl RelationDeriver {
                     )
                 })
                 .collect();
-            let hash = digest(
-                serde_json::to_vec(&(
-                    &manifest.files[file].file_hash,
-                    &indexer,
-                    &occurrences,
-                    targets,
-                ))
-                .unwrap(),
-            );
+            // Streamed straight into the hasher: the key covers every same-named
+            // target, so the JSON text can be large and is only ever compared.
+            let hash = digest_json(&(
+                &manifest.files[file].file_hash,
+                &indexer,
+                &occurrences,
+                targets,
+            ))
+            .unwrap();
             let cached = self
                 .files
                 .get(file)
@@ -1514,62 +1541,28 @@ impl RelationDeriver {
                 let mut relations = BTreeMap::new();
                 // One allocation per file instead of one per relation.
                 let shared_indexer: Arc<str> = indexer.as_str().into();
-                let shared_derivation: Arc<str> =
-                    "syntax_occurrence+name_match; lexical scope and shadowing not resolved".into();
+                let shared_derivation: Arc<str> = L1_DERIVATION.into();
                 let shared_file_hash: Arc<str> = manifest.files[file].file_hash.as_str().into();
                 for occurrence in occurrences {
                     check()?;
                     let Some(targets) = by_name.get(occurrence.name.as_str()) else {
                         continue;
                     };
-                    let caller = occurrence
-                        .enclosing_symbol_id
-                        .clone()
-                        .unwrap_or_else(|| format!("file:{}", occurrence.file));
+                    let caller = l1_caller(occurrence);
                     let span = serde_json::to_string(&occurrence.span).unwrap();
                     for symbol in targets {
                         check()?;
-                        if occurrence.kind == "call"
-                            && !matches!(
-                                symbol.kind.as_str(),
-                                "function" | "trait_method" | "struct"
-                            )
-                        {
+                        if !l1_applies(occurrence, symbol) {
                             continue;
                         }
-                        let id = identity(
-                            "rel",
-                            &[
-                                &occurrence.kind,
-                                &caller,
-                                &symbol.symbol_id,
-                                &occurrence.file,
-                                &span,
-                            ],
+                        let relation = l1_relation(
+                            occurrence,
+                            &caller,
+                            &span,
+                            symbol,
+                            [&shared_indexer, &shared_derivation, &shared_file_hash],
                         );
-                        relations.insert(
-                            id.clone(),
-                            Relation {
-                                relation_id: id.clone(),
-                                kind: occurrence.kind.clone(),
-                                from_symbol: caller.clone(),
-                                to_symbol: symbol.symbol_id.clone(),
-                                file: occurrence.file.clone(),
-                                span: occurrence.span,
-                                certainty: Certainty::Candidate,
-                                freshness: "current".into(),
-                                runtime: "unavailable".into(),
-                                origin: None,
-                                evidence: vec![Evidence {
-                                    evidence_id: identity("ev", &[&id, "L1"]),
-                                    source: "L1".into(),
-                                    certainty: Certainty::Candidate,
-                                    indexer: shared_indexer.clone(),
-                                    derivation: shared_derivation.clone(),
-                                    file_hash: shared_file_hash.clone(),
-                                }],
-                            },
-                        );
+                        relations.insert(relation.relation_id.clone(), relation);
                     }
                 }
                 let relations = relations.into_values().collect::<Vec<_>>();
@@ -1607,10 +1600,8 @@ impl RelationDeriver {
                     .insert(file.into(), (hash, relations.clone(), weight));
                 relations
             };
-            for relation in relations.iter() {
-                check()?;
-                result.insert(relation.relation_id.clone(), relation.clone());
-            }
+            check()?;
+            held.push(relations);
             while self
                 .files
                 .values()
@@ -1620,9 +1611,73 @@ impl RelationDeriver {
                 self.files.pop_first();
             }
         }
-        Ok(result.into_values().collect())
+        let mut ordered: Vec<&Relation> = held.iter().flat_map(|file| file.iter()).collect();
+        check()?;
+        ordered.sort_unstable_by(|a, b| a.relation_id.cmp(&b.relation_id));
+        Ok(ordered.into_iter().cloned().collect())
     }
 }
+pub(crate) const L1_DERIVATION: &str =
+    "syntax_occurrence+name_match; lexical scope and shadowing not resolved";
+
+/// The node an occurrence's relation starts from: its enclosing symbol, or a
+/// per-file pseudo node for top-level code.
+pub(crate) fn l1_caller(occurrence: &Occurrence) -> String {
+    occurrence
+        .enclosing_symbol_id
+        .clone()
+        .unwrap_or_else(|| format!("file:{}", occurrence.file))
+}
+
+/// Calls only bind to callable-looking declarations; other kinds bind to any
+/// same-named symbol.
+pub(crate) fn l1_applies(occurrence: &Occurrence, symbol: &Symbol) -> bool {
+    occurrence.kind != "call"
+        || matches!(symbol.kind.as_str(), "function" | "trait_method" | "struct")
+}
+
+/// The one place a syntax (L1) name-match relation is built, shared by the
+/// full derivation and the per-query index so both produce identical edges.
+/// `shared` is `[indexer, derivation, file_hash]`.
+pub(crate) fn l1_relation(
+    occurrence: &Occurrence,
+    caller: &str,
+    span_json: &str,
+    symbol: &Symbol,
+    shared: [&Arc<str>; 3],
+) -> Relation {
+    let id = identity(
+        "rel",
+        &[
+            &occurrence.kind,
+            caller,
+            &symbol.symbol_id,
+            &occurrence.file,
+            span_json,
+        ],
+    );
+    Relation {
+        relation_id: id.clone(),
+        kind: occurrence.kind.clone(),
+        from_symbol: caller.to_string(),
+        to_symbol: symbol.symbol_id.clone(),
+        file: occurrence.file.clone(),
+        span: occurrence.span,
+        certainty: Certainty::Candidate,
+        freshness: "current".into(),
+        runtime: "unavailable".into(),
+        origin: None,
+        evidence: vec![Evidence {
+            evidence_id: identity("ev", &[&id, "L1"]),
+            source: "L1".into(),
+            certainty: Certainty::Candidate,
+            indexer: shared[0].clone(),
+            derivation: shared[1].clone(),
+            file_hash: shared[2].clone(),
+        }],
+    }
+}
+
 pub fn syntax_relations(view: &AnalysisView) -> Vec<Relation> {
     RelationDeriver::default().derive(view)
 }
@@ -1699,16 +1754,16 @@ fn syntax_relations_reference(view: &AnalysisView) -> Vec<Relation> {
 }
 
 pub fn relations(stored: &StoredView) -> Vec<Relation> {
-    stored.index().relations().to_vec()
+    stored.full_index().relations().to_vec()
 }
 
 pub(crate) fn relations_with_deadline(
     stored: &StoredView,
     deadline: Instant,
 ) -> Result<Vec<Relation>> {
-    let check = || crate::query::check_deadline(deadline);
+    let mut check = || crate::query::check_deadline(deadline);
     check()?;
-    if let Some(index) = stored.index.get() {
+    if let Some(index) = stored.full.get() {
         return index
             .relations()
             .iter()
@@ -1722,52 +1777,43 @@ pub(crate) fn relations_with_deadline(
         .deriver
         .lock()
         .unwrap()
-        .derive_checked(&stored.view, check)?;
-    let mut merged = BTreeMap::new();
-    for r in derived {
-        check()?;
-        merged.insert(r.relation_id.clone(), r);
-    }
-    for relation in stored.view.relations.iter().chain(stored.references.iter()) {
-        check()?;
-        match merged.get_mut(&relation.relation_id) {
-            Some(existing) => {
-                existing.evidence.extend(relation.evidence.clone());
-                existing.certainty = relation.certainty.clone();
-                existing.freshness = relation.freshness.clone();
-                existing.origin = relation.origin.clone();
-            }
-            None => {
-                merged.insert(relation.relation_id.clone(), relation.clone());
-            }
-        }
-    }
-    Ok(merged.into_values().collect())
+        .derive_checked(&stored.view, &mut check)?;
+    merge_layers(derived, stored, check)
 }
 
 fn merged_relations(stored: &StoredView) -> Vec<Relation> {
-    let mut merged: BTreeMap<_, _> = stored
-        .deriver
-        .lock()
-        .unwrap()
-        .derive(&stored.view)
-        .into_iter()
-        .map(|r| (r.relation_id.clone(), r))
-        .collect();
+    let derived = stored.deriver.lock().unwrap().derive(&stored.view);
+    merge_layers(derived, stored, || Ok(())).expect("infallible relation merge")
+}
+
+/// Overlay the published and reference relations on the derived ones.
+fn merge_layers(
+    mut all: Vec<Relation>,
+    stored: &StoredView,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<Vec<Relation>> {
     for relation in stored.view.relations.iter().chain(stored.references.iter()) {
-        match merged.get_mut(&relation.relation_id) {
-            Some(existing) => {
-                existing.evidence.extend(relation.evidence.clone());
-                existing.certainty = relation.certainty.clone();
-                existing.freshness = relation.freshness.clone();
-                existing.origin = relation.origin.clone();
+        check()?;
+        all.push(relation.clone());
+    }
+    // A stable sort keeps derived, published and reference relations in that
+    // order within one id, so folding adjacent duplicates applies them in the
+    // same order as inserting them one by one: evidence accumulates and the
+    // later certainty, freshness and origin win.
+    all.sort_by(|a, b| a.relation_id.cmp(&b.relation_id));
+    let mut merged: Vec<Relation> = Vec::with_capacity(all.len());
+    for relation in all {
+        match merged.last_mut() {
+            Some(existing) if existing.relation_id == relation.relation_id => {
+                existing.evidence.extend(relation.evidence);
+                existing.certainty = relation.certainty;
+                existing.freshness = relation.freshness;
+                existing.origin = relation.origin;
             }
-            None => {
-                merged.insert(relation.relation_id.clone(), relation.clone());
-            }
+            _ => merged.push(relation),
         }
     }
-    merged.into_values().collect()
+    Ok(merged)
 }
 
 #[cfg(test)]
@@ -2099,6 +2145,80 @@ mod index_tests {
         assert!(json["file_hash"].is_string() && json["indexer"].is_string());
         let back: Evidence = serde_json::from_value(json).unwrap();
         assert_eq!(&back, a[0]);
+    }
+
+    #[test]
+    fn merged_relations_sorts_and_folds_duplicates_in_layer_order() {
+        let mut manifest = stored("merge", 0).view.snapshot.manifest.clone();
+        manifest.files = BTreeMap::from([(
+            "a.rs".into(),
+            SourceFile::new("pub fn t() {} pub fn x() { t(); } pub fn y() { t(); }"),
+        )]);
+        let syntax = Frontends::new().unwrap().analyze(&manifest).unwrap();
+        let mut view = RefreshCoordinator::default()
+            .publish_inputs(manifest, syntax)
+            .unwrap();
+        let derived = RelationDeriver::default().derive(&view);
+        assert!(derived.len() >= 2, "fixture must derive several relations");
+        let shared = derived[0].clone();
+
+        // The published layer and the reference layer both repeat a derived id.
+        let layer = |tag: &str, certainty: Certainty, freshness: &str| {
+            let mut relation = shared.clone();
+            relation.evidence = vec![Evidence {
+                evidence_id: format!("ev-{tag}"),
+                source: tag.into(),
+                certainty: certainty.clone(),
+                indexer: "test".into(),
+                derivation: tag.into(),
+                file_hash: "h".into(),
+            }];
+            relation.certainty = certainty;
+            relation.freshness = freshness.into();
+            relation
+        };
+        Arc::make_mut(&mut view).relations.push(layer(
+            "published",
+            Certainty::Candidate,
+            "pending",
+        ));
+        let mut unique = shared.clone();
+        unique.relation_id = "rel_000_only_in_references".into();
+        let references = vec![layer("reference", Certainty::Definite, "current"), unique];
+        let stored = StoredView::new(view, references, vec![]);
+
+        let merged = merged_relations(&stored);
+        // One entry per id, in id order, with nothing dropped or duplicated.
+        let ids = merged.iter().map(|r| &r.relation_id).collect::<Vec<_>>();
+        assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
+        assert_eq!(merged.len(), derived.len() + 1);
+        // Evidence accumulates derived -> published -> reference.
+        let folded = merged
+            .iter()
+            .find(|r| r.relation_id == shared.relation_id)
+            .unwrap();
+        let sources = folded.evidence.iter().map(|e| e.source.as_str());
+        assert_eq!(
+            sources.collect::<Vec<_>>(),
+            ["L1", "published", "reference"]
+        );
+        // The last layer wins for certainty, freshness and origin.
+        assert_eq!(folded.certainty, Certainty::Definite);
+        assert_eq!(folded.freshness, "current");
+        assert_eq!(folded.origin, None);
+        // Relations present in only one layer pass through unchanged.
+        let only = merged
+            .iter()
+            .find(|r| r.relation_id == "rel_000_only_in_references")
+            .unwrap();
+        assert_eq!(only.evidence, shared.evidence);
+        // Untouched derived relations keep their single piece of evidence.
+        for relation in merged
+            .iter()
+            .filter(|r| r.relation_id != shared.relation_id && r.relation_id != only.relation_id)
+        {
+            assert_eq!(relation.evidence.len(), 1);
+        }
     }
 
     fn stored(id: &str, semantic: u64) -> StoredView {

@@ -51,7 +51,7 @@
 
 - **默认查询缓存预算对 5.5 万行仓库已不够。** `status` 显示默认配置下 query_cache `estimated_bytes=0`、30 次 miss/30 次 eviction：单个视图的估算权重超过 64MiB 上限，每次查询后即被驱逐，`refs`/`calls`/`impact` 每次都重建约 27.5 万条关系的合并索引。调大后同一视图常驻，估算权重 526MiB。
 - 视图估算权重 526MiB 对应 5.5 万行源码，但这个估算**不是虚高**：缓存该视图后 daemon 的实际 RSS 约 766MB（含持久化视图、语法事实和游标缓存，不能与估算一一对应，但量级一致）。内存大的原因是关系规模（L1 名称候选 27.5 万条）乘以每条关系的字符串开销：每条 `Relation` 带约 12 个独立 `String`（其中 `kind`、`freshness`、`runtime`、`source`、`indexer`、`derivation`、`file_hash` 在大量关系间完全相同），`RelationDeriver` 的按文件缓存（`Arc<Vec<Relation>>`）与合并后的 `IndexedView` 很可能各持一份关系数据，这一点只读了代码，未用实测验证。按此推算，百万行仓库的 L1 关系在当前布局下很难放进 64MiB 默认预算。已实施其中一个方向：对重复字符串做共享（`Arc<str>`，见下一节）；让索引与 deriver 缓存共享同一份 `Arc<Relation>` 未实施。
-- 每个响应都携带全部 `known_gaps`（ripgrep 为 2,952 条、约 550KB，占 `search`/`refs`/`calls` 响应的约 80%）；`context` 已有按 kind 聚合的先例，其他查询没有。`cursor_cache` 因此在默认配置下被单个结果占用约 54/64MiB。
+- 每个响应都携带全部 `known_gaps`（ripgrep 为 2,952 条、约 550KB，占 `search`/`refs`/`calls` 响应的约 80%）；`context` 已有按 kind 聚合的先例，其他查询没有。（后续实测更正：`cursor_expired` 并不是 `known_gaps` 造成的，见文末“缺口聚合”一节。）
 - 缓存淘汰行为由现有测试 `cache_enforces_byte_budget_and_rechecks_lazy_index_growth` 固定，属有意的内存上限；默认预算与回收阈值在 roadmap 中仍是待决策项，未改默认值。
 - 调大预算后 `impact` 仍约 1s，超过 500ms 目标，原因未查。
 
@@ -82,4 +82,68 @@
 - **tokio**：视图估算权重超过 2GiB 上限，`status` 显示 18 次淘汰、缓存字节数为 0，每次查询都重建关系索引，`refs/calls/impact` 都在 10s 以上，查询后 RSS 3.6GB。
 - **rust-analyzer**：`refs/calls/impact` 的 5 次测量在约 10–11s 与 128–166s 之间交替，这 5 次中至少有一次返回 `timeout` 错误（脚本只记录最后一个错误码，没有逐次对应），原因未查。查询后 RSS 8.5GB，`search` 也在 1.1–1.7s。
 - 以上均为 L1 名称候选关系，不含语义索引。名称匹配会让每个同名 occurrence 与每个同名符号两两成关系（见 `engine.rs` 的 L1 派生循环），因此候选关系数与同名符号数相关；各仓库的关系总数本轮只在 ripgrep 和 clap 上取到（27.5 万、61.1 万），tokio 与 rust-analyzer 未取到，所以“不随行数线性增长”只是推断，未验证。
-- 结论：在当前"全量物化 L1 候选关系"的设计下，clap（8.5 万行）以上的仓库在 `refs/calls/impact` 上已不满足 500ms 目标。继续调大缓存只是用内存换时间（tokio 已占 3.6GB，rust-analyzer 8.5GB），不是合理的出路。共享字符串只带来约 20% 的内存改善，不改变这个量级。可能的方向是按需派生关系或限制同名候选的展开，这是设计层面的变更，本轮未实施，也未评估收益。
+- 结论：在当前"全量物化 L1 候选关系"的设计下，clap（8.5 万行）以上的仓库在 `refs/calls/impact` 上已不满足 500ms 目标。继续调大缓存只是用内存换时间（tokio 已占 3.6GB，rust-analyzer 8.5GB），不是合理的出路。共享字符串只带来约 20% 的内存改善，不改变这个量级。可能的方向是按需派生关系或限制同名候选的展开，这是设计层面的变更，下一节已对点查询实施。
+
+## 缺口聚合与建索引优化（ripgrep，2026-11-05）
+
+**缺口聚合**：`known_gaps` 中同类型超过 3 条的条目折叠成 `{kind, count, samples[3], details_tool}`，不超过 3 条的保持原样；`doctor` 的 `analysis_health` 新增 `diagnostic_counts`、前 1000 条 `diagnostics` 和 `omitted_diagnostics` 作为完整明细入口。因协议未发布，没有保留旧格式。
+
+|指标|聚合前|聚合后|
+|---|---|---|
+|`known_gaps` 条目数（`search Searcher`）|2,952|5|
+|`search` 响应体积|约 770KB|约 111KB|
+|`calls` 响应体积|约 665KB|约 5KB|
+|`search`（默认配置）|约 150–220ms|约 110–130ms|
+
+- **更正**：我先前预测聚合后 `impact` 的 `cursor_expired` 会消失，**这是错的**。默认配置下 `impact` 仍返回 `cursor_expired`。调大游标预算后看到 `impact` 响应约 1.2MB，其中 `nodes` 约 773KB、`relations` 约 145KB、`frontier`/`output` 各约 27KB，`known_gaps` 已不是大头；9 个游标合计约 290MB。原因是游标保存了整次遍历的结果（还剩 63,260 项），而不是只保存已返回的 100 项，未改。
+- `refs`/`calls` 在默认配置下仍约 1.2s，因为视图缓存抖动（见前文），与响应体积无关。
+
+**建索引（冷启动首次 `refs`，4 次，重启 daemon，2GiB 缓存预算）**：
+
+|版本|首次 `refs`|之后 `refs`|daemon RSS|
+|---|---|---|---|
+|共享字符串后（基线）|1,155–1,255ms|111–118ms|约 700MB|
+|本轮改动后|1,046–1,096ms|105–116ms|约 685MB|
+
+约 -8% 的时间、-2% 的内存。改动：`IndexedView::new` 只在键首次出现时克隆符号和文件名；两处重复的 `BTreeMap` 合并逻辑改为同一个排序后折叠相邻同 id 的实现；`RelationDeriver::derive` 末尾不再把每条关系克隆进全局 `BTreeMap`；派生缓存键改为流式哈希（`digest_json`）。
+
+**分阶段计时**（release，临时测试，已删除；ripgrep 275,464 条关系）：
+
+|阶段|耗时|
+|---|---|
+|语法分析（tree-sitter）|约 530ms|
+|`derive`（冷）|约 720–900ms|
+|`derive`（第二次）|约 640–780ms，77 个文件中重建 77 个|
+|克隆全部关系|约 65ms|
+|按 id 排序|约 5ms|
+|`merged_relations`|约 750–1,050ms|
+|`IndexedView::new`|约 110–130ms|
+|`estimated_heap_bytes`|约 80–105ms|
+|其中 `identity()` 哈希（每条关系 2 次）|约 234ms|
+
+- 上面的结论：**合并、排序、克隆都不是瓶颈**，我之前的几次判断（全局 map 键克隆、缓存键 JSON 序列化）都没有带来明显改善，已用计时排除。
+- `RelationDeriver` 自带 64MiB 缓存对 ripgrep 形同虚设：第二次 `derive` 仍重建了全部 77 个文件，缓存里只留下 24 个。
+- 冷派生本身约 700ms，其中 `identity()` 约占三分之一，其余是为每个“出现位置 × 同名符号”构造 `Relation` 的字符串分配。只要仍然物化全部 27.5 万条关系，这部分降不下来。
+- `impact` 在关系索引已缓存时仍约 1s，原因未查，与上面的建索引成本无关。
+
+## 点查询按需派生（2026-11-05）
+
+`StoredView::index()` 改为返回新的 `QueryIndex`：只常驻已发布/引用层的少量关系，加上按名称、调用者、位置建立的紧凑表；`adjacent` / `relations_at` 在查询时才派生该符号或位置相关的语法关系，并按 id 叠加显式关系，叠加顺序与全量合并一致。全量扫描（服务聚合、diff 关系增减、模块地图、循环检测）和“按任意 id 取关系”改用 `full_index()`，仍会物化全部关系，这些路径没有变快。派生关系的构造抽成 `l1_relation`，全量派生与按需派生共用。遍历与路径枚举的节点/边改为拥有所有权的 `String`，关系在单次遍历内缓存。
+
+**ripgrep（默认配置，不调缓存预算）**：
+
+|指标|改动前|改动后|
+|---|---|---|
+|冷启动首次 `refs`|1,046–1,096ms|144–151ms|
+|之后 `refs`|105–116ms|106–121ms|
+|daemon RSS|约 685MB|183–206MB|
+|`refs`（默认 64MiB 缓存）|约 1,200ms|约 107ms|
+|`calls`（默认 64MiB 缓存）|约 1,200ms|约 100ms|
+|`impact`（默认配置）|约 1,900ms，`cursor_expired`|约 970ms，仍 `cursor_expired`|
+|缓存估算权重|526MiB|约 57MiB（上限 64MiB，余量很小）|
+
+**clap（2GiB 缓存预算，5 次）**：search 约 226→134ms，refs 382–484→约 150ms，calls 225–250→约 135ms，impact 655–906→约 556ms，查询后 RSS 2,165→1,553MB。1.5GB 的构成未查，怀疑是游标缓存持有大型 `impact` 结果，未验证。
+
+**正确性**：新增 2 个差分测试，用带歧义同名符号的多文件夹具对每个符号、三个方向、每个位置，比较按需结果与全量合并索引逐条相等，并覆盖已发布层与引用层叠加、叠加后带旧快照 origin 的关系不出现在当前位置。对其中两处做了变异检查（不再剔除带 origin 的关系；叠加时不覆盖 certainty），两个测试均报失败。另在 ripgrep 与 clap 上用旧版（上一个提交）与新版对 `refs`、`calls`（两个方向）、`impact`、`path` 共 35 个查询比较 JSON，去掉游标、耗时、存储统计和 `known_gaps` 后全部一致；其中末尾仓库 15 个响应有 13 个非空、0 个错误。该对照不比较 `known_gaps`，因为旧版没有缺口聚合。
+
+**未覆盖**：tokio 与 rust-analyzer 在新版上的数据本轮未取到，上一节的数字仍是旧版结果；`impact` 约 1s 与 `cursor_expired` 未解决，原因同前（遍历结果与游标整体保存）。

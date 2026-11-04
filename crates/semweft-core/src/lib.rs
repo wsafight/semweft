@@ -4,7 +4,7 @@ mod refresh;
 pub use refresh::*;
 // Keep existing adapters and persisted data compatible with the shared types.
 pub use semweft_shared::{
-    LineIndex, Position, Span, byte_offset, digest, from_utf16, identity, to_utf16,
+    LineIndex, Position, Span, byte_offset, digest, digest_json, from_utf16, identity, to_utf16,
 };
 
 use serde::{Deserialize, Serialize};

@@ -18,6 +18,7 @@ pub mod lsp;
 mod module_resolution;
 mod process;
 pub mod query;
+pub mod query_index;
 pub mod reviews;
 pub mod risk_inputs;
 mod scip;

@@ -812,7 +812,11 @@ pub fn render(
             writeln!(out, "- {kind}: {count}")?;
         }
         if gaps_all {
-            for gap in gaps {
+            let details = gaps.iter().flat_map(|gap| match gap["samples"].as_array() {
+                Some(samples) => samples.iter().collect::<Vec<_>>(),
+                None => vec![gap],
+            });
+            for gap in details {
                 writeln!(
                     out,
                     "- {}: {}",

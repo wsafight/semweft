@@ -204,7 +204,7 @@ fn collect_findings(
             .filter_map(Value::as_str)
         {
             query::check_deadline(deadline)?;
-            if let Some(relation) = stored.index().relation(id) {
+            if let Some(relation) = stored.full_index().relation(id) {
                 evidence.push(query::relation_value(relation, stored));
             }
         }

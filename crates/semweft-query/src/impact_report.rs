@@ -154,9 +154,7 @@ pub(crate) fn enrich(
         ),
         (
             "analysis_gaps",
-            result["completeness"]["known_gaps"]
-                .as_array()
-                .map_or(0, Vec::len),
+            crate::query::gap_total(&result["completeness"]["known_gaps"]),
             "Analysis has disclosed missing evidence",
         ),
         (
@@ -221,9 +219,7 @@ pub(crate) fn enrich(
         .filter_map(|relation| relation["from"].as_str())
         .collect::<BTreeSet<_>>()
         .len();
-    let gap_count = result["completeness"]["known_gaps"]
-        .as_array()
-        .map_or(0, Vec::len);
+    let gap_count = crate::query::gap_total(&result["completeness"]["known_gaps"]);
     let pending_units = base.view.pending_units.len() + head.view.pending_units.len();
     let configuration_changes = count("configuration_changes");
     let residual_references = count("residual_references");

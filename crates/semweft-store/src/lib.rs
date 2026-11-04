@@ -114,24 +114,37 @@ impl IndexedView {
                 .or_default()
                 .push(i);
         }
+        // Most relations share a handful of symbols and files, so look the key up
+        // first and clone it only when it is new.
+        fn push<K: Ord + ToOwned<Owned = String> + ?Sized>(
+            map: &mut BTreeMap<String, Vec<usize>>,
+            key: &K,
+            i: usize,
+        ) where
+            String: std::borrow::Borrow<K>,
+        {
+            match map.get_mut(key) {
+                Some(offsets) => offsets.push(i),
+                None => {
+                    map.insert(key.to_owned(), vec![i]);
+                }
+            }
+        }
         for (i, relation) in index.relations.iter().enumerate() {
-            index
-                .incoming
-                .entry(relation.to_symbol.clone())
-                .or_default()
-                .push(i);
-            index
-                .outgoing
-                .entry(relation.from_symbol.clone())
-                .or_default()
-                .push(i);
+            push(&mut index.incoming, relation.to_symbol.as_str(), i);
+            push(&mut index.outgoing, relation.from_symbol.as_str(), i);
             // An origin-bearing relation has coordinates in its origin snapshot,
             // so it cannot resolve a position in the current captured source.
             if relation.origin.is_none() {
+                if !index.locations.contains_key(relation.file.as_str()) {
+                    index
+                        .locations
+                        .insert(relation.file.clone(), BTreeMap::new());
+                }
                 index
                     .locations
-                    .entry(relation.file.clone())
-                    .or_default()
+                    .get_mut(relation.file.as_str())
+                    .unwrap()
                     .entry(relation.span)
                     .or_default()
                     .push(i);

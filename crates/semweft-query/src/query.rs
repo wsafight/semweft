@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use semweft_core::*;
-use semweft_store::{Direction, IndexedView};
+use semweft_store::Direction;
 use serde_json::{Value, json};
 use std::{
     cell::RefCell,
@@ -827,9 +827,7 @@ impl QueryService {
                 let edges = filtered(
                     stored
                         .index()
-                        .adjacent(&target.symbol_id, Direction::Incoming)
-                        .cloned()
-                        .collect(),
+                        .adjacent(&target.symbol_id, Direction::Incoming),
                     args,
                 )
                 .into_iter()
@@ -876,8 +874,8 @@ impl QueryService {
                         old = historical
                             .index()
                             .adjacent(&matching[0].symbol_id, Direction::Incoming)
+                            .into_iter()
                             .filter(|r| r.freshness == "current")
-                            .cloned()
                             .map(|mut r| {
                                 r.freshness = "stale".into();
                                 r
@@ -1223,6 +1221,56 @@ pub fn summary(relations: &[Relation], basis: &str) -> Value {
     }
     json!({"basis":basis,"exact":basis!="partial","relation_count":relations.len(),"evidence_count":relations.iter().map(|r|r.evidence.len()).sum::<usize>(),"source":source,"certainty":certainty,"freshness":freshness,"runtime":runtime})
 }
+/// Collapse many gaps of one kind (and side) into a single counted record with a
+/// few samples, so a response does not repeat thousands of per-file diagnostics.
+/// Small groups stay as individual entries. Consumers sum `count` (default 1);
+/// the full list is available from `doctor`.
+pub fn aggregate_gaps(gaps: Vec<Value>) -> Vec<Value> {
+    const KEEP: usize = 3;
+    let mut order: Vec<(String, String)> = vec![];
+    let mut groups: BTreeMap<(String, String), Vec<Value>> = BTreeMap::new();
+    for gap in gaps {
+        let key = (
+            gap["kind"].as_str().unwrap_or("unknown").to_string(),
+            gap["side"].as_str().unwrap_or("").to_string(),
+        );
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(gap);
+    }
+    order
+        .into_iter()
+        .flat_map(|key| {
+            let items = groups.remove(&key).unwrap_or_default();
+            if items.len() <= KEEP {
+                return items;
+            }
+            let samples = items
+                .iter()
+                .take(KEEP)
+                .map(|gap| json!({"file":gap["file"],"reason":gap["reason"]}))
+                .collect::<Vec<_>>();
+            let mut record =
+                json!({"kind":key.0,"count":items.len(),"samples":samples,"details_tool":"doctor"});
+            if !key.1.is_empty() {
+                record["side"] = json!(key.1);
+            }
+            vec![record]
+        })
+        .collect()
+}
+
+/// Number of underlying gaps, counting aggregated records by their `count`.
+pub fn gap_total(gaps: &Value) -> usize {
+    gaps.as_array().map_or(0, |items| {
+        items
+            .iter()
+            .map(|gap| gap["count"].as_u64().unwrap_or(1) as usize)
+            .sum()
+    })
+}
+
 pub fn envelope(stored: &StoredView, fresh: Value) -> Value {
     let view = &stored.view;
     let mut gaps = view
@@ -1232,6 +1280,7 @@ pub fn envelope(stored: &StoredView, fresh: Value) -> Value {
         .map(|d| json!({"kind":d.code,"file":d.file,"reason":d.message}))
         .collect::<Vec<_>>();
     gaps.push(json!({"kind":"syntax_binding_candidates","reason":"L1 name matching does not resolve lexical scope, shadowing or external consumers; candidate sets may contain false positives"}));
+    let gaps = aggregate_gaps(gaps);
     let languages = view
         .snapshot
         .manifest
@@ -1309,13 +1358,7 @@ fn symbol_at(result: &mut Value, stored: &StoredView, args: &Value) -> Result<()
         .find(|o| o.span.contains(pos));
     result["occurrence"] = json!(occurrence);
     let edges = occurrence
-        .map(|o| {
-            stored
-                .index()
-                .relations_at(path, o.span)
-                .cloned()
-                .collect::<Vec<_>>()
-        })
+        .map(|o| stored.index().relations_at(path, o.span))
         .unwrap_or_default();
     result["symbols"] = json!(
         edges
@@ -1360,27 +1403,48 @@ pub fn truncation_reason<'a>(previous: Option<&'a str>, next: Option<&'a str>) -
         previous
     }
 }
+/// Edges are relation ids; the relations behind them are derived on demand and
+/// remembered for the length of one traversal so filters and result assembly
+/// never have to look an id up again.
 struct RelationGraph<'a> {
-    index: &'a IndexedView,
+    index: &'a crate::query_index::QueryIndex,
     direction: Direction,
+    seen: std::cell::RefCell<BTreeMap<String, Relation>>,
 }
-impl<'a> semweft_algo::graph::GraphView for RelationGraph<'a> {
-    type Node = &'a str;
-    type Edge = &'a str;
+impl<'a> RelationGraph<'a> {
+    fn new(index: &'a crate::query_index::QueryIndex, direction: Direction) -> Self {
+        Self {
+            index,
+            direction,
+            seen: Default::default(),
+        }
+    }
 
-    fn neighbors(&self, node: &&'a str) -> impl Iterator<Item = (&'a str, &'a str)> {
-        let index = self.index;
+    /// A relation produced by an earlier `neighbors` call.
+    fn relation(&self, id: &str) -> Relation {
+        self.seen.borrow()[id].clone()
+    }
+}
+impl semweft_algo::graph::GraphView for RelationGraph<'_> {
+    type Node = String;
+    type Edge = String;
+
+    fn neighbors(&self, node: &String) -> impl Iterator<Item = (String, String)> {
         let direction = self.direction;
-        let node = *node;
-        index.adjacent(node, direction).map(move |r| {
+        let edges = self.index.adjacent(node, direction);
+        let mut seen = self.seen.borrow_mut();
+        let mut out = Vec::with_capacity(edges.len());
+        for r in edges {
             let next = match direction {
-                Direction::Incoming => r.from_symbol.as_str(),
-                Direction::Outgoing => r.to_symbol.as_str(),
-                Direction::Both if r.to_symbol == node => r.from_symbol.as_str(),
-                Direction::Both => r.to_symbol.as_str(),
+                Direction::Incoming => r.from_symbol.clone(),
+                Direction::Outgoing => r.to_symbol.clone(),
+                Direction::Both if r.to_symbol == *node => r.from_symbol.clone(),
+                Direction::Both => r.to_symbol.clone(),
             };
-            (r.relation_id.as_str(), next)
-        })
+            out.push((r.relation_id.clone(), next));
+            seen.insert(r.relation_id.clone(), r);
+        }
+        out.into_iter()
     }
 }
 
@@ -1397,11 +1461,10 @@ pub fn traverse(
         "both" => Direction::Both,
         _ => Direction::Incoming,
     };
-    let index = stored.index();
-    let graph = RelationGraph { index, direction };
+    let graph = RelationGraph::new(stored.index(), direction);
     let traversal = breadth_first_filtered(
         &graph,
-        target,
+        target.to_string(),
         Limits {
             max_depth: args["depth"].as_u64().unwrap_or(3),
             max_nodes: args["max_nodes"].as_u64().unwrap_or(1000) as usize,
@@ -1416,8 +1479,8 @@ pub fn traverse(
             }
         },
         |id| {
-            let relation = index.relation(id).unwrap();
-            (impact || relation.kind == "call") && filter_relation(relation.clone(), args).is_some()
+            let relation = graph.relation(id);
+            (impact || relation.kind == "call") && filter_relation(relation, args).is_some()
         },
     );
     let reason = traversal.reason.map(|reason| match reason {
@@ -1440,16 +1503,16 @@ pub fn traverse(
                 path.reverse();
             }
             (
-                filter_relation(index.relation(id).unwrap().clone(), args).unwrap(),
+                filter_relation(graph.relation(&id), args).unwrap(),
                 visit.depth,
-                path.into_iter().map(str::to_owned).collect(),
+                path,
             )
         })
         .collect();
     Graph {
         edges,
-        nodes: traversal.nodes.into_iter().map(str::to_owned).collect(),
-        frontier: traversal.frontier.into_iter().map(str::to_owned).collect(),
+        nodes: traversal.nodes,
+        frontier: traversal.frontier.into_iter().collect(),
         basis,
         reason,
     }
@@ -1474,18 +1537,16 @@ fn find_paths(
     let from = resolve(stored, args["from"].as_str().unwrap())?;
     let to = resolve(stored, args["to"].as_str().unwrap())?;
     let index = stored.index();
+    let graph = RelationGraph::new(index, Direction::Outgoing);
     let limits = Limits {
         max_depth: args["max_depth"].as_u64().unwrap_or(5),
         max_paths: args["max_paths"].as_u64().unwrap_or(100) as usize,
         max_nodes: args["max_nodes"].as_u64().unwrap_or(1000) as usize,
     };
     let traversal = simple_paths_filtered(
-        &RelationGraph {
-            index,
-            direction: Direction::Outgoing,
-        },
-        from.symbol_id.as_str(),
-        to.symbol_id.as_str(),
+        &graph,
+        from.symbol_id.clone(),
+        to.symbol_id.clone(),
         limits,
         || {
             if check_cancelled().is_err() {
@@ -1497,8 +1558,8 @@ fn find_paths(
             }
         },
         |id| {
-            let relation = index.relation(id).unwrap();
-            relation.kind == "call" && filter_relation(relation.clone(), args).is_some()
+            let relation = graph.relation(id);
+            relation.kind == "call" && filter_relation(relation, args).is_some()
         },
     );
     if traversal.reason == Some(StopReason::Cancelled) {
@@ -1521,7 +1582,7 @@ fn find_paths(
     };
     let mut relations = BTreeMap::new();
     let paths = traversal.paths.iter().map(|path| {
-        let edges = path.edges.iter().map(|id| filter_relation(index.relation(id).unwrap().clone(), args).unwrap()).collect::<Vec<_>>();
+        let edges = path.edges.iter().map(|id| filter_relation(graph.relation(id), args).unwrap()).collect::<Vec<_>>();
         for edge in &edges {
             relations.insert(edge.relation_id.clone(), edge.clone());
         }
@@ -1577,7 +1638,7 @@ fn context_pack(
     for gap in gaps {
         *counts
             .entry(gap["kind"].as_str().unwrap_or("unknown").into())
-            .or_default() += 1;
+            .or_default() += gap["count"].as_u64().unwrap_or(1) as usize;
     }
     result["completeness"]["known_gaps"] = json!(
         counts
@@ -1631,10 +1692,7 @@ fn context_pack(
         if Instant::now() >= deadline {
             bail!("timeout: context retrieval exceeded query deadline");
         }
-        let relations = stored
-            .index()
-            .adjacent(&root.symbol_id, Direction::Both)
-            .collect::<Vec<_>>();
+        let relations = stored.index().adjacent(&root.symbol_id, Direction::Both);
         for edge in &relations {
             let reason = if edge.to_symbol == root.symbol_id && enabled("callers") {
                 Some("callers")
@@ -1812,6 +1870,59 @@ fn count_context(result: &mut Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gap(kind: &str, file: &str) -> Value {
+        json!({"kind":kind,"file":file,"reason":format!("{kind} in {file}")})
+    }
+
+    #[test]
+    fn small_gap_groups_stay_individual_and_large_groups_become_counted_samples() {
+        let mut gaps = vec![gap("rare", "a.rs"), gap("rare", "b.rs")];
+        gaps.extend((0..500).map(|i| gap("closure", &format!("f{i}.rs"))));
+        gaps.push(gap("other", "z.rs"));
+        let out = aggregate_gaps(gaps);
+        // First-seen order is kept: rare (2 raw), closure (1 record), other (1 raw).
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0]["file"], "a.rs");
+        assert_eq!(out[1]["file"], "b.rs");
+        assert_eq!(out[2]["kind"], "closure");
+        assert_eq!(out[2]["count"], 500);
+        assert_eq!(out[2]["samples"].as_array().unwrap().len(), 3);
+        assert_eq!(out[2]["samples"][0]["file"], "f0.rs");
+        assert_eq!(out[2]["details_tool"], "doctor");
+        assert_eq!(out[3]["kind"], "other");
+        // The total is preserved across aggregation.
+        assert_eq!(gap_total(&json!(out)), 2 + 500 + 1);
+    }
+
+    #[test]
+    fn aggregation_keeps_sides_separate_and_threshold_is_inclusive() {
+        let mut gaps = vec![];
+        for side in ["base", "head"] {
+            gaps.extend(
+                (0..3)
+                    .map(|i| json!({"kind":"k","side":side,"file":format!("{i}.rs"),"reason":"r"})),
+            );
+        }
+        // Exactly three per side: nothing is collapsed.
+        assert_eq!(aggregate_gaps(gaps.clone()).len(), 6);
+        gaps.push(json!({"kind":"k","side":"base","file":"x.rs","reason":"r"}));
+        let out = aggregate_gaps(gaps);
+        let base = out
+            .iter()
+            .find(|g| g["side"] == "base" && g["count"].is_u64());
+        assert_eq!(base.unwrap()["count"], 4);
+        assert_eq!(out.iter().filter(|g| g["side"] == "head").count(), 3);
+        assert_eq!(gap_total(&json!(out)), 7);
+    }
+
+    #[test]
+    fn gap_total_handles_missing_and_empty_gaps() {
+        assert_eq!(gap_total(&json!([])), 0);
+        assert_eq!(gap_total(&Value::Null), 0);
+        assert_eq!(gap_total(&json!([{"kind":"a"},{"kind":"b","count":9}])), 10);
+        assert!(aggregate_gaps(vec![]).is_empty());
+    }
 
     #[test]
     fn fixed_requery_preserves_selected_commit_context_with_reused_semantic_views() {
@@ -2678,9 +2789,9 @@ mod tests {
         let l3 = graph("L3", "definite");
         assert_eq!(l3.edges.len(), 1);
         assert_eq!(l3.edges[0].0.evidence[0].source, "L3");
-        assert_eq!(indexed.index().relations()[0].evidence.len(), 2);
+        assert_eq!(indexed.full_index().relations()[0].evidence.len(), 2);
         assert_eq!(
-            indexed.index().relations()[0].certainty,
+            indexed.full_index().relations()[0].certainty,
             Certainty::Definite
         );
         let excluded = traverse(

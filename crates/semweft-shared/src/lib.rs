@@ -3,4 +3,4 @@ mod coordinates;
 mod hash;
 
 pub use coordinates::*;
-pub use hash::{digest, identity};
+pub use hash::{digest, digest_json, identity};

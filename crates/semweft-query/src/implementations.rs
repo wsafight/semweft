@@ -299,8 +299,9 @@ pub(crate) fn find(
             continue;
         }
         let name_match = names_trait(block, &trait_symbol.name);
-        let header: Vec<&Relation> = index
-            .relations_at(&block.file, block.trait_span)
+        let at_header = index.relations_at(&block.file, block.trait_span);
+        let header: Vec<&Relation> = at_header
+            .iter()
             .filter(|relation| {
                 relation.kind == "type"
                     && !semantic_evidence(relation, stored).is_empty()
@@ -425,13 +426,14 @@ pub(crate) fn find(
             } else {
                 test_scope(method, stored)
             };
-            for call in index.adjacent(&method.symbol_id, semweft_store::Direction::Incoming) {
+            for call in &index.adjacent(&method.symbol_id, semweft_store::Direction::Incoming) {
                 check_deadline(deadline)?;
                 if call.kind != "call" {
                     continue;
                 }
-                let witnesses: Vec<&Relation> = index
-                    .relations_at(&call.file, call.span)
+                let at_call = index.relations_at(&call.file, call.span);
+                let witnesses: Vec<&Relation> = at_call
+                    .iter()
                     .filter(|relation| {
                         relation.kind == "call"
                             && relation.from_symbol == call.from_symbol

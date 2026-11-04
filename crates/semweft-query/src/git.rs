@@ -690,16 +690,17 @@ pub fn impact(service: &QueryService, args: &Value, deadline: Instant) -> Result
             .into_iter()
             .find(|reason| fresh["reason"] == *reason || base_fresh["reason"] == *reason)
             .map_or(Value::Null, |reason| json!(reason));
+    let base_gaps = base
+        .view
+        .known_gaps
+        .iter()
+        .chain(base.reference_gaps.iter())
+        .map(|d| json!({"kind":d.code,"file":d.file,"side":"base","reason":d.message}))
+        .collect::<Vec<_>>();
     result["completeness"]["known_gaps"]
         .as_array_mut()
         .unwrap()
-        .extend(
-            base.view
-                .known_gaps
-                .iter()
-                .chain(base.reference_gaps.iter())
-                .map(|d| json!({"kind":d.code,"side":"base","reason":d.message})),
-        );
+        .extend(crate::query::aggregate_gaps(base_gaps));
     let mut changes = vec![];
     let mut formatting = vec![];
     let mut used = BTreeSet::new();
