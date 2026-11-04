@@ -1512,6 +1512,11 @@ impl RelationDeriver {
             } else {
                 self.files_rebuilt += 1;
                 let mut relations = BTreeMap::new();
+                // One allocation per file instead of one per relation.
+                let shared_indexer: Arc<str> = indexer.as_str().into();
+                let shared_derivation: Arc<str> =
+                    "syntax_occurrence+name_match; lexical scope and shadowing not resolved".into();
+                let shared_file_hash: Arc<str> = manifest.files[file].file_hash.as_str().into();
                 for occurrence in occurrences {
                     check()?;
                     let Some(targets) = by_name.get(occurrence.name.as_str()) else {
@@ -1542,11 +1547,29 @@ impl RelationDeriver {
                                 &span,
                             ],
                         );
-                        relations.insert(id.clone(), Relation {
-                            relation_id:id.clone(), kind:occurrence.kind.clone(),from_symbol:caller.clone(),to_symbol:symbol.symbol_id.clone(),file:occurrence.file.clone(),span:occurrence.span,
-                            certainty:Certainty::Candidate,freshness:"current".into(),runtime:"unavailable".into(),origin:None,
-                            evidence:vec![Evidence { evidence_id:identity("ev", &[&id,"L1"]), source:"L1".into(),certainty:Certainty::Candidate,indexer:indexer.clone(),derivation:"syntax_occurrence+name_match; lexical scope and shadowing not resolved".into(),file_hash:manifest.files[file].file_hash.clone() }],
-                        });
+                        relations.insert(
+                            id.clone(),
+                            Relation {
+                                relation_id: id.clone(),
+                                kind: occurrence.kind.clone(),
+                                from_symbol: caller.clone(),
+                                to_symbol: symbol.symbol_id.clone(),
+                                file: occurrence.file.clone(),
+                                span: occurrence.span,
+                                certainty: Certainty::Candidate,
+                                freshness: "current".into(),
+                                runtime: "unavailable".into(),
+                                origin: None,
+                                evidence: vec![Evidence {
+                                    evidence_id: identity("ev", &[&id, "L1"]),
+                                    source: "L1".into(),
+                                    certainty: Certainty::Candidate,
+                                    indexer: shared_indexer.clone(),
+                                    derivation: shared_derivation.clone(),
+                                    file_hash: shared_file_hash.clone(),
+                                }],
+                            },
+                        );
                     }
                 }
                 let relations = relations.into_values().collect::<Vec<_>>();
@@ -1567,15 +1590,16 @@ impl RelationDeriver {
                             + r.evidence
                                 .iter()
                                 .map(|e| {
-                                    e.evidence_id.capacity()
-                                        + e.source.capacity()
-                                        + e.indexer.capacity()
-                                        + e.derivation.capacity()
-                                        + e.file_hash.capacity()
+                                    // indexer, derivation and file_hash are shared per
+                                    // file; counted once below, not per relation.
+                                    e.evidence_id.capacity() + e.source.capacity()
                                 })
                                 .sum::<usize>()
                     })
-                    .sum();
+                    .sum::<usize>()
+                    + indexer.len()
+                    + 80
+                    + manifest.files[file].file_hash.len();
                 let weight = (relations.capacity() * std::mem::size_of::<Relation>() + buffers)
                     .saturating_mul(2);
                 let relations = Arc::new(relations);
@@ -1657,13 +1681,15 @@ fn syntax_relations_reference(view: &AnalysisView) -> Vec<Relation> {
                             .analysis_versions
                             .get("syntax")
                             .cloned()
-                            .unwrap_or_else(crate::frontend::version),
+                            .unwrap_or_else(crate::frontend::version)
+                            .into(),
                         derivation:
                             "syntax_occurrence+name_match; lexical scope and shadowing not resolved"
                                 .into(),
                         file_hash: view.snapshot.manifest.files[&occurrence.file]
                             .file_hash
-                            .clone(),
+                            .as_str()
+                            .into(),
                     }],
                 },
             );
@@ -2032,6 +2058,47 @@ mod index_tests {
             derive.derive(&view);
             assert_eq!(derive.files_rebuilt, 0);
         }
+    }
+
+    #[test]
+    fn derived_evidence_shares_per_file_strings_and_keeps_the_stored_format() {
+        let mut manifest = stored("share", 0).view.snapshot.manifest.clone();
+        manifest.files = BTreeMap::from([
+            (
+                "a.rs".into(),
+                SourceFile::new("pub fn t() {} pub fn x() { t(); } pub fn y() { t(); t(); }"),
+            ),
+            ("b.rs".into(), SourceFile::new("pub fn z() { t(); }")),
+        ]);
+        let syntax = Frontends::new().unwrap().analyze(&manifest).unwrap();
+        let view = RefreshCoordinator::default()
+            .publish_inputs(manifest, syntax)
+            .unwrap();
+        let relations = RelationDeriver::default().derive(&view);
+        let in_file = |file: &str| {
+            relations
+                .iter()
+                .filter(|r| r.file == file)
+                .map(|r| &r.evidence[0])
+                .collect::<Vec<_>>()
+        };
+        let (a, b) = (in_file("a.rs"), in_file("b.rs"));
+        assert!(
+            a.len() >= 3 && !b.is_empty(),
+            "fixture must yield several relations"
+        );
+        for evidence in &a[1..] {
+            assert!(Arc::ptr_eq(&a[0].indexer, &evidence.indexer));
+            assert!(Arc::ptr_eq(&a[0].derivation, &evidence.derivation));
+            assert!(Arc::ptr_eq(&a[0].file_hash, &evidence.file_hash));
+        }
+        // Different files keep their own content hash.
+        assert_ne!(a[0].file_hash, b[0].file_hash);
+        // Shared strings still serialize as plain JSON strings and round-trip.
+        let json = serde_json::to_value(a[0]).unwrap();
+        assert!(json["file_hash"].is_string() && json["indexer"].is_string());
+        let back: Evidence = serde_json::from_value(json).unwrap();
+        assert_eq!(&back, a[0]);
     }
 
     fn stored(id: &str, semantic: u64) -> StoredView {

@@ -327,7 +327,7 @@ fn implementation_targets_are_candidates_with_their_own_derivation() {
     let current = coordinator.complete(&ticket, result).unwrap();
     assert_eq!(current.relations[0].certainty, Certainty::Candidate);
     assert_eq!(
-        current.relations[0].evidence[0].derivation,
+        &*current.relations[0].evidence[0].derivation,
         "lsp_implementation+syntax_callsite"
     );
 }
@@ -363,7 +363,7 @@ fn scip_go_static_dispatch_requires_concrete_current_go_bindings() {
         let current = coordinator.complete(&ticket, batch).unwrap();
         assert_eq!(current.relations[0].certainty, expected);
         assert_eq!(
-            current.relations[0].evidence[0].derivation,
+            &*current.relations[0].evidence[0].derivation,
             "scip_occurrence+go_static_dispatch+syntax_callsite"
         );
     }

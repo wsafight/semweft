@@ -84,7 +84,10 @@ fn evidence(
         }
         .into(),
         derivation: derivation.into(),
-        file_hash: stored.view.snapshot.manifest.files[file].file_hash.clone(),
+        file_hash: stored.view.snapshot.manifest.files[file]
+            .file_hash
+            .as_str()
+            .into(),
     }
 }
 

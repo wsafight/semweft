@@ -343,10 +343,12 @@ pub fn analyze(
                         derivation: format!(
                             "SCIP occurrence {} aligned to captured syntax",
                             occurrence.symbol
-                        ),
+                        )
+                        .into(),
                         file_hash: snapshot.manifest.files[&document.relative_path]
                             .file_hash
-                            .clone(),
+                            .as_str()
+                            .into(),
                     }],
                 },
             );

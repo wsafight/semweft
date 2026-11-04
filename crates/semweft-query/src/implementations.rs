@@ -54,7 +54,7 @@ fn semantic_evidence<'a>(relation: &'a Relation, stored: &StoredView) -> Vec<&'a
     relation
         .evidence
         .iter()
-        .filter(|evidence| evidence.source == "L3" && evidence.file_hash == file.file_hash)
+        .filter(|evidence| evidence.source == "L3" && *evidence.file_hash == *file.file_hash)
         .collect()
 }
 
@@ -110,7 +110,7 @@ impl Draft {
             certainty: Certainty::Candidate,
             indexer: indexer.into(),
             derivation: HEADER_DERIVATION.into(),
-            file_hash: block.file_hash.clone(),
+            file_hash: block.file_hash.as_str().into(),
         };
         Self {
             relation: Relation {
@@ -149,7 +149,7 @@ impl Draft {
                     &evidence.evidence_id,
                 ],
             );
-            copy.derivation = format!("{prefix}:{}", evidence.derivation);
+            copy.derivation = format!("{prefix}:{}", evidence.derivation).into();
             self.freshness
                 .insert(copy.evidence_id.clone(), source.freshness.clone());
             if label.is_none()
@@ -653,7 +653,7 @@ mod tests {
                 certainty,
                 indexer: "scip-test".into(),
                 derivation: "SCIP occurrence aligned to captured syntax".into(),
-                file_hash: block.file_hash.clone(),
+                file_hash: block.file_hash.as_str().into(),
             }],
             origin: None,
         }

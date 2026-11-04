@@ -200,9 +200,11 @@ pub struct Evidence {
     pub evidence_id: String,
     pub source: String,
     pub certainty: Certainty,
-    pub indexer: String,
-    pub derivation: String,
-    pub file_hash: String,
+    // Shared: these repeat across most evidence in a view, so each distinct
+    // value is allocated once and cloned by reference count.
+    pub indexer: std::sync::Arc<str>,
+    pub derivation: std::sync::Arc<str>,
+    pub file_hash: std::sync::Arc<str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -573,9 +573,9 @@ impl RefreshCoordinator {
                     ),
                     source: "L3".into(),
                     certainty: certainty.clone(),
-                    indexer: batch.backend.clone(),
+                    indexer: batch.backend.as_str().into(),
                     derivation: target.derivation.evidence_label().into(),
-                    file_hash: call.file_hash.clone(),
+                    file_hash: call.file_hash.as_str().into(),
                 };
                 relations.insert(
                     relation_id.clone(),

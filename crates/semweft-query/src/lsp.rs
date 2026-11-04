@@ -619,7 +619,7 @@ impl LspClient {
                     ],
                 );
                 let certainty = Certainty::Candidate;
-                relations.insert(id.clone(), Relation { relation_id:id.clone(), kind:kind.into(), from_symbol:caller, to_symbol:symbol.symbol_id.clone(), file:file.clone(), span, certainty:certainty.clone(), freshness:"current".into(), runtime:"unavailable".into(), origin:None, evidence:vec![Evidence { evidence_id:identity("ev", &[&id, backend, "references"]), source:"L3".into(), certainty, indexer:backend.into(), derivation:"lsp_reference+syntax_occurrence; binding does not prove runtime dispatch or access behavior".into(), file_hash:snapshot.manifest.files[&file].file_hash.clone() }] });
+                relations.insert(id.clone(), Relation { relation_id:id.clone(), kind:kind.into(), from_symbol:caller, to_symbol:symbol.symbol_id.clone(), file:file.clone(), span, certainty:certainty.clone(), freshness:"current".into(), runtime:"unavailable".into(), origin:None, evidence:vec![Evidence { evidence_id:identity("ev", &[&id, backend, "references"]), source:"L3".into(), certainty, indexer:backend.into(), derivation:"lsp_reference+syntax_occurrence; binding does not prove runtime dispatch or access behavior".into(), file_hash:snapshot.manifest.files[&file].file_hash.as_str().into() }] });
             }
         }
         Ok(Some((relations.into_values().collect(), diagnostics)))
