@@ -2,13 +2,13 @@
 
 > 本文：审查闭环、视图与实现约束。 [返回文档索引](../semweft.md)
 
-**当前实现**：macOS 本地代码分析工作台，使用 GPUI 0.2.2 + gpui-rsx 0.10.2。可浏览完整源码及大纲、语法着色、按行定位、点击标识符查询定义候选、搜索符号和文本、导航调用与引用、查看模块依赖矩阵/候选循环、代码度量/Git 热点、保存书签，以及审查 Git 双侧变更。源码位置与定义目标校验文件内容哈希，查询固定快照与语义 epoch，同名候选保留证据与确定性。Rust、Go、TS/JS 的语法候选入口已接入，具体范围见[桌面工作台说明](../crates/semweft-desktop/README.md)。下文的正式审查闭环与 Agent 控制接口仍为设计，尚未接入。
+**当前实现**：macOS 本地代码分析工作台，使用 GPUI 0.2.2 + gpui-rsx 0.11.0。桌面持有常驻服务 lease，通过本地 IPC 按页查询，可取消捕获、导航和分析任务。11 个页面包含交互调用/依赖图、完整 Base/Head 源码与定义导航、行对齐 diff 和批注、验证/测试/架构工作流、正式本地审查请求、七种深入查询、工作区/文件标签和会话布局恢复。源码来自不可变 manifest，跳转校验对应侧的哈希和 UTF-8 坐标。应用包内含引擎和示例，运行时独立于开发仓库及 Python；安装工具支持本地校验、升级和回滚。具体范围和验证入口见[桌面工作台说明](../crates/semweft-desktop/README.md)。
 
-当前桌面 UI 已统一九页的分组导航、页面标题、工具栏与内容卡片；文件浏览采用可折叠目录树、文件标签、路径面包屑及可收起大纲。SVG 图标与交互控件同样通过 gpui-rsx 组件组合。
+当前桌面 UI 统一 11 页的导航、工具栏与内容布局；节点和交互使用 RSX，有向边使用 GPUI canvas。图显示最多 160 个可达节点及隐藏数量，保留候选/过期样式，支持手动布局、鸟瞰和位置保存。人工请求由 `review create` 创建并固定报告，桌面可逐项处理发现和源码批注；事件带 revision 并可由 `get_review_result` 读取。`review wait` 是 60 秒内有界轮询，不提供推送通知。记录是本地审查证据，不是数字签名或发布门禁。
 
 ## 1. 定位
 
-MCP 提供只读的查询与核验接口，代码修改由 Agent 的其他工具完成。桌面审查台帮助人核查影响证据、规则结果和待确认项。它在 v0.3 交付首版，以 gpui-kit 为候选框架；核心引擎不等待桌面端开发。
+MCP 提供只读的查询与核验接口，代码修改由 Agent 的其他工具完成。桌面审查台帮助人核查影响证据、规则结果和待确认项。正式请求已通过 CLI、本地 daemon 控制接口及桌面端串联；仍未接入远端托管平台、推送通知或密码学签名。
 
 **定位**：围绕一次具体改动审查证据：基于哪个快照、检查了什么、哪些关系是候选、哪些判断需要补充证据。是否提升审查效率以对照实验验证，不把界面形式当作竞品无法复制的壁垒。
 
@@ -16,13 +16,13 @@ MCP 提供只读的查询与核验接口，代码修改由 Agent 的其他工具
 
 ## 2. 审查闭环
 
-1. Agent 运行 semweft review --diff <selector> --format json；CLI 经本地 daemon 的 create_review 控制接口捕获 base/head，生成并固定影响证据及已请求规则结果，返回 review_id、两侧 snapshot_id 与 epochs、diff 哈希和审查链接。提交契约见[接口规格](interfaces.md)第 1.6 节。
+1. Agent 运行 `semweft review create --diff <selector> --open`；CLI 经本地 daemon 创建请求，捕获并固定 base/head 源码、验证发现与报告身份，返回 review_id、两侧 snapshot_id 与 epochs 及 diff 哈希。`review open <review_id>` 可重新打开；当前打开动作使用本机桌面应用，不生成远端 PR/网页链接。
 
 2. 审查台按 review_id 读取固定的分析视图及报告哈希，核对代码与证据版本，突出 pending、candidate、known_gaps 和未执行规则。
 
 3. 人查看代码、测试结果和需求，确认或驳回具体条目；整项批准与条目备注分开记录。
 
-4. 人的决定经本地 record_review_decision 保存；记录绑定 review_id、审查者、两侧 snapshot_id 与 epochs、diff 哈希及报告哈希。Agent 通过只读 get_review_result 拉取记录后处理意见。
+4. 人的决定经带预期 revision 的本地事件接口保存；记录绑定 review_id、审查者、两侧 snapshot_id 与 epochs、diff 哈希及报告哈希。Agent 通过只读 `get_review_result` 拉取记录；CLI `review wait` 仅轮询版本变化，不保证唤醒 Agent。
 
 5. 代码、构建或分析输入变化使旧批准不再适用于当前改动，旧请求标记 superseded。语义补齐不覆盖已提交视图；采用新语义证据时创建新审查请求。两种情况都不迁移旧批准；人工确认不把候选关系变成确定关系。
 
@@ -51,16 +51,16 @@ MCP 提供只读的查询与核验接口，代码修改由 Agent 的其他工具
 
 - **大图性能单独验证**：按模块折叠与可视区域渲染；后续图视图在固定硬件、总节点数、边数与可见元素数量下测布局耗时和帧耗时，不将万节点 60 帧作为 v0.1 验收门槛
 
-- **入口打通**：CLI（`semweft review --diff <selector> --open`）创建请求并打开视图；`semweft review --id <review_id> --open` 或 PR 评论中的链接打开已有请求
+- **入口打通**：CLI（`semweft review create --diff <selector> --open`）创建请求并打开视图；`semweft review open <review_id>` 重新打开本机请求。PR 评论链接及远端托管平台尚未接入
 
-- **方便分享**：视图可以导出 SVG、PNG 和 Markdown 摘要，用于 PR 评论、技术交流与项目展示
+- **方便分享**：当前支持图 SVG 和分析 JSON 导出；PNG、Markdown 摘要及 PR 集成尚未实现
 
 ## 5. 技术实现
 
-- 服务接入方向：semweft-desktop 作为独立进程，通过本地 IPC 访问查询服务和审查控制接口；公开协议位于 semweft-protocol，不链接 semweft-query 的采集、语言和存储实现。当前预览的实际依赖以其 Cargo.toml 为准，GUI 框架出问题不影响引擎、CLI 和 MCP
+- 服务接入：semweft-desktop 通过一次隐藏 CLI 引导取得 `DesktopEndpoint`，随后复用本地 IPC 和 watcher lease。协议位于 semweft-protocol；桌面不链接 semweft-query 的采集、语言和存储实现。源码分页及人工报告保存是本地控制入口，不增加 MCP 写工具
 
-- 首版视图围绕影响列表、规则结果与代码/诊断侧栏；当前预览按用户指定采用 gpui-rsx 声明布局，gpui-kit 组件与复杂调用图继续单独验证
+- 视图使用 gpui-rsx 声明布局与组件；虚拟列表和 canvas 使用 GPUI 原生能力。刷新六阶段进度与任务取消保留原视图，分页校验快照和语义 epoch
 
-- 图视图基于 gpui 自绘；分层布局、力导向等布局算法放在独立 crate，方便 IDE 插件和 Web 导出复用
+- 图视图基于 GPUI canvas 连线和 RSX 节点；确定性分层布局、节点上限、循环和聚合逻辑位于桌面纯数据模块，SVG 导出复用该模型。尚未提取公共布局 crate，也没有力导向布局和万节点交互承诺
 
-- gpui、gpui-kit、gpui-rsx 三者版本严格锁定，升级前先跑视图回归测试
+- gpui 和 gpui-rsx 版本严格锁定；升级后先改造受影响代码并跑消费端及原生视图回归，再清理已解决反馈。发布包目前使用 ad-hoc 签名，尚未实现 Developer ID 公证、自动更新及 Windows/Linux 桌面交付

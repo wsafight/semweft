@@ -1,4 +1,6 @@
 mod client;
+mod diff;
+mod graph;
 mod model;
 mod source;
 
@@ -11,6 +13,41 @@ mod ui;
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let command = args.next();
+    if command.as_deref() == Some("--check-service") {
+        let path = args
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("--check-service requires JSON path"))?;
+        let data = model::Preview::load(std::path::Path::new(&path))?;
+        return client::check_service(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            &data,
+        );
+    }
+    if command.as_deref() == Some("--capture") {
+        let workspace = std::path::PathBuf::from(
+            args.next()
+                .ok_or_else(|| anyhow::anyhow!("--capture requires workspace and JSON output"))?,
+        )
+        .canonicalize()?;
+        let destination = std::path::PathBuf::from(
+            args.next()
+                .ok_or_else(|| anyhow::anyhow!("--capture requires JSON output"))?,
+        );
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let captured = client::Client::new(&repository, &workspace)
+            .capture(false, &client::Cancellation::default())?;
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&destination, serde_json::to_vec(&captured.raw)?)?;
+        println!(
+            "Captured {} files, {} symbols, {} Base files",
+            captured.sources.len(),
+            captured.symbols.symbols.len(),
+            captured.base_sources.len()
+        );
+        return Ok(());
+    }
     if command.as_deref() == Some("--check-text") {
         ui::check_native_text(&gpui::Application::new().text_system())?;
         println!("Native macOS text backend: system and CJK glyph bounds verified");

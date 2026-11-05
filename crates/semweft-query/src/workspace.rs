@@ -9,6 +9,11 @@ pub struct Capture {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// Paths that carry indexable source in any supported frontend.
+pub fn is_source(path: &str) -> bool {
+    path.ends_with(".rs") || path.ends_with(".go") || crate::web::is_source(path)
+}
+
 pub fn capture(root: &Path, workspace_id: &str, backend: &str) -> Result<Capture> {
     let mut files = BTreeMap::new();
     let mut binary_files = BTreeMap::new();

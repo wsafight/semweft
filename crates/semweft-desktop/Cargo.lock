@@ -1128,6 +1128,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "doctest-file"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
+
+[[package]]
 name = "dtor"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1817,9 +1823,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-rsx"
-version = "0.10.2"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c19743c160475cf453ef3445d56767cd778c8ffefb3b8c5ae343da4abaa6b948"
+checksum = "1a330d93e44a713f47d3bc18a44a95c78fccc8cffc1c4de5ac116755f6f8d4e5"
 dependencies = [
  "gpui-rsx-core",
  "proc-macro2",
@@ -1829,9 +1835,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-rsx-core"
-version = "0.10.2"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b65fb576d618435087f89d8cb10c6d02637952c2afc1e7466ca585aa7dce827"
+checksum = "28414120b66efdfeedbfd117227e15b57dcd6dad3523210d0594bf4d6eb25665"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2394,6 +2400,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "interprocess"
+version = "2.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4a4fff6c51dece332bdbf3af5fe376c49cfc8dced782725e95be0bb489e35d7"
+dependencies = [
+ "doctest-file",
+ "libc",
+ "recvmsg",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3685,6 +3704,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
 
 [[package]]
+name = "recvmsg"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
+
+[[package]]
 name = "redox_syscall"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4066,6 +4091,8 @@ dependencies = [
  "anyhow",
  "gpui",
  "gpui-rsx",
+ "interprocess",
+ "semweft-protocol",
  "semweft-shared",
  "serde",
  "serde_json",
@@ -4076,6 +4103,15 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "semweft-protocol"
+version = "0.1.0-dev"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -5432,6 +5468,12 @@ dependencies = [
  "rustix 0.38.44",
  "winsafe",
 ]
+
+[[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 
 [[package]]
 name = "winapi"

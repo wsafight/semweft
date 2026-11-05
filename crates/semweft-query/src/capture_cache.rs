@@ -124,7 +124,6 @@ mod tests {
         assert_eq!((cache.files_read, cache.files_reused), (0, 2));
         let path = resolved.root.join("src/lib.rs");
         fs::write(&path, "pub fn b() {}\n").unwrap();
-        cache.invalidate(std::slice::from_ref(&path), false);
         assert_eq!(
             cache.capture(&resolved, "none", false).unwrap().manifest,
             workspace::capture_config(&resolved, "none")

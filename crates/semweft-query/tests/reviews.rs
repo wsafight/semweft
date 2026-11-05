@@ -61,6 +61,52 @@ fn review_binds_diff_snapshots_rules_and_invalidates_after_edits() {
         current["review"]["diff_digest"],
         report["diff_identity"]["digest"]
     );
+    let request = reviews::create(&resolved, report.clone(), "Check this change").unwrap();
+    let concurrent = reviews::create(&resolved, report.clone(), "Concurrent reviewers").unwrap();
+    let outcomes = std::thread::scope(|scope| {
+        let workers = ["first", "second"].map(|reviewer| {
+            let resolved = &resolved;
+            let engine = &engine;
+            let id = concurrent["review_id"].clone();
+            scope.spawn(move || reviews::decide(resolved, engine, &json!({"review_id":id,"revision":0,"conclusion":"comment","reviewer":reviewer})))
+        });
+        workers.map(|worker| worker.join().unwrap().is_ok())
+    });
+    assert_eq!(outcomes.into_iter().filter(|success| *success).count(), 1);
+    let request_id = request["review_id"].as_str().unwrap();
+    assert_eq!(request["state"], "pending");
+    let mut decision = json!({"review_id":request_id,"revision":0,"conclusion":"approve","reviewer":"local reviewer"});
+    if !request["items"].as_array().unwrap().is_empty() {
+        assert!(reviews::decide(&resolved, &engine, &decision).is_err());
+    }
+    for (index, item) in request["items"].as_array().unwrap().iter().enumerate() {
+        let decided = reviews::decide(&resolved, &engine, &json!({"review_id":request_id,"revision":index,"item_id":item["item_id"],"conclusion":"accept","reviewer":"local reviewer","note":"Evidence checked"})).unwrap();
+        assert_eq!(decided["state"], "in_review");
+    }
+    decision["revision"] = json!(request["items"].as_array().unwrap().len());
+    let approved = reviews::decide(&resolved, &engine, &decision).unwrap();
+    assert_eq!(approved["state"], "approved");
+    assert_eq!(approved["validity"]["approval_applies"], true);
+    assert!(reviews::decide(&resolved, &engine, &decision).is_err());
+    let reloaded = service
+        .execute(
+            "get_review_result",
+            json!({"review_id":request_id}),
+            deadline(),
+        )
+        .unwrap();
+    assert_eq!(reloaded["review"]["events"], approved["events"]);
+    let mut annotation = json!({"review_id":request_id,"revision":approved["revision"],"item_id":"source","conclusion":"comment","reviewer":"local reviewer","note":"Check this line", "location":{"side":"head","file":"src/lib.rs","line":1,"file_hash":"wrong"}});
+    assert!(reviews::decide(&resolved, &engine, &annotation).is_err());
+    annotation["location"]["file_hash"] = json!(semweft_core::digest(
+        fs::read(root.join("src/lib.rs")).unwrap()
+    ));
+    let annotated = reviews::decide(&resolved, &engine, &annotation).unwrap();
+    assert_eq!(annotated["state"], "in_review");
+    assert_eq!(annotated["validity"]["approval_applies"], false);
+    decision["revision"] = annotated["revision"].clone();
+    let approved = reviews::decide(&resolved, &engine, &decision).unwrap();
+    assert_eq!(approved["state"], "approved");
     fs::write(
         root.join("src/lib.rs"),
         "pub fn entry() { let another = 2; }\n",
@@ -70,6 +116,32 @@ fn review_binds_diff_snapshots_rules_and_invalidates_after_edits() {
         .execute("get_review_result", json!({"review_id":id}), deadline())
         .unwrap();
     assert_eq!(edited["review"]["validity"]["approval_applies"], false);
+    let superseded = service
+        .execute(
+            "get_review_result",
+            json!({"review_id":request_id}),
+            deadline(),
+        )
+        .unwrap();
+    assert_eq!(superseded["review"]["state"], "superseded");
+    decision["revision"] = approved["revision"].clone();
+    assert!(reviews::decide(&resolved, &engine, &decision).is_err());
+    let path = resolved
+        .index_dir
+        .join("reviews")
+        .join(format!("{request_id}.events.json"));
+    let mut events = approved["events"].clone();
+    events[0]["note"] = json!("changed after the decision");
+    fs::write(path, serde_json::to_vec(&events).unwrap()).unwrap();
+    assert!(
+        service
+            .execute(
+                "get_review_result",
+                json!({"review_id":request_id}),
+                deadline()
+            )
+            .is_err()
+    );
     let pinned = service.execute("get_review_result",json!({"review_id":id,"snapshot_id":report["snapshot_id"],"semantic_epoch":report["epochs"]["semantic"]}),deadline()).unwrap();
     assert_eq!(pinned["review"]["validity"]["approval_applies"], true);
     let mut corrupt = record.clone();

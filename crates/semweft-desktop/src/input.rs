@@ -638,6 +638,14 @@ impl TextInput {
         &self.content
     }
 
+    pub fn set_value(&mut self, value: String, cx: &mut Context<Self>) {
+        self.clear(cx);
+        let end = value.len();
+        self.content = value.into();
+        self.selected_range = end..end;
+        cx.notify();
+    }
+
     pub fn with_key_context(mut self, context: &'static str) -> Self {
         self.key_context = context;
         self

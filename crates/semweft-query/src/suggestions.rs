@@ -3,7 +3,7 @@ use crate::{
     query::{self, QueryService},
 };
 use anyhow::{Context, Result, bail};
-use semweft_core::Symbol;
+use semweft_core::{Certainty, Relation, Symbol};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Instant};
 
@@ -86,11 +86,61 @@ fn add_candidate(
     }
 }
 
+#[derive(Clone, Copy)]
+enum ReportRelation<'a> {
+    Json(&'a Value),
+    Typed(&'a (Relation, u64, Vec<String>)),
+}
+
+impl ReportRelation<'_> {
+    fn text(&self, field: &str) -> Option<&str> {
+        match self {
+            Self::Json(value) => value[field].as_str(),
+            Self::Typed((relation, _, _)) => match field {
+                "relation_id" => Some(&relation.relation_id),
+                "from" => Some(&relation.from_symbol),
+                "to" => Some(&relation.to_symbol),
+                "kind" => Some(&relation.kind),
+                "certainty" => Some(if relation.certainty == Certainty::Definite {
+                    "definite"
+                } else {
+                    "candidate"
+                }),
+                _ => None,
+            },
+        }
+    }
+
+    fn side(&self) -> &str {
+        self.text("side").unwrap_or("head")
+    }
+
+    fn path(&self) -> Vec<Option<&str>> {
+        match self {
+            Self::Json(value) => value["path"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(Value::as_str)
+                .collect(),
+            Self::Typed((_, _, path)) => path.iter().map(|id| Some(id.as_str())).collect(),
+        }
+    }
+
+    fn value(&self, stored: &StoredView) -> Value {
+        match self {
+            Self::Json(value) => (*value).clone(),
+            Self::Typed(edge) => query::graph_value(edge, stored),
+        }
+    }
+}
+
 pub(crate) fn report(
     service: &QueryService,
     mut impact: Value,
     args: &Value,
     deadline: Instant,
+    graph: Option<&query::Graph>,
 ) -> Result<Value> {
     query::check_deadline(deadline)?;
     let mut sides = BTreeMap::new();
@@ -118,21 +168,23 @@ pub(crate) fn report(
             .or_default()
             .push(symbol);
     }
-    let relations = impact["relations"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
+    let relations = if let Some(graph) = graph {
+        graph
+            .edges
+            .iter()
+            .map(ReportRelation::Typed)
+            .collect::<Vec<_>>()
+    } else {
+        impact["relations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(ReportRelation::Json)
+            .collect()
+    };
     let lookup = relations
         .iter()
-        .filter_map(|relation| {
-            Some((
-                (
-                    relation["side"].as_str().unwrap_or("head"),
-                    relation["relation_id"].as_str()?,
-                ),
-                relation,
-            ))
-        })
+        .filter_map(|relation| Some(((relation.side(), relation.text("relation_id")?), relation)))
         .collect::<BTreeMap<_, _>>();
     let mut candidates = BTreeMap::new();
     let mut roots = vec![];
@@ -166,15 +218,15 @@ pub(crate) fn report(
         }
     }
     if !timed_out {
-        for relation in relations {
+        for relation in &relations {
             query::check_cancelled()?;
             if Instant::now() >= deadline {
                 timed_out = true;
                 break;
             }
-            let side = relation["side"].as_str().unwrap_or("head");
-            let Some(symbol) = relation["from"]
-                .as_str()
+            let side = relation.side();
+            let Some(symbol) = relation
+                .text("from")
                 .and_then(|id| sides[side].index().symbol(id))
             else {
                 continue;
@@ -182,18 +234,17 @@ pub(crate) fn report(
             if test_attribute(symbol, &sides[side]).is_none() {
                 continue;
             }
-            let ids = relation["path"]
-                .as_array()
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
+            let ids = relation.path();
             let path = ids
                 .iter()
-                .filter_map(|id| lookup.get(&(side, id.as_str()?)).copied())
+                .filter_map(|id| lookup.get(&(side, (*id)?)).copied())
                 .collect::<Vec<_>>();
             if path.is_empty()
                 || path.len() != ids.len()
-                || path[0]["from"] != symbol.symbol_id
-                || path.windows(2).any(|pair| pair[0]["to"] != pair[1]["from"])
+                || path[0].text("from") != Some(symbol.symbol_id.as_str())
+                || path
+                    .windows(2)
+                    .any(|pair| pair[0].text("to") != pair[1].text("from"))
             {
                 missing_paths += 1;
                 continue;
@@ -205,9 +256,10 @@ pub(crate) fn report(
                 &sides,
                 &head_names,
                 json!({
-                    "side":side,"reason":if path.iter().all(|edge| edge["kind"] == "call") { "call_path" } else { "reference_path" },
-                    "target_symbol_id":path.last().unwrap()["to"],"path":path,
-                    "path_certainty":if path.iter().all(|edge| edge["certainty"] == "definite") { "definite" } else { "candidate" }
+                    "side":side,"reason":if path.iter().all(|edge| edge.text("kind") == Some("call")) { "call_path" } else { "reference_path" },
+                    "target_symbol_id":path.last().unwrap().text("to"),
+                    "path":path.iter().map(|edge| edge.value(&sides[side])).collect::<Vec<_>>(),
+                    "path_certainty":if path.iter().all(|edge| edge.text("certainty") == Some("definite")) { "definite" } else { "candidate" }
                 }),
             );
         }

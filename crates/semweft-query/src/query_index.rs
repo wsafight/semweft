@@ -25,7 +25,7 @@ pub struct QueryIndex {
     enclosed: BTreeMap<String, Vec<usize>>,
     /// Top-level occurrences keyed by file; their caller is the `file:` node.
     top_level: BTreeMap<String, Vec<usize>>,
-    occurrences_by_location: BTreeMap<String, BTreeMap<Span, Vec<usize>>>,
+    occurrences_by_location: BTreeMap<String, Vec<usize>>,
 }
 
 /// Look the key up first so it is cloned only the first time it is seen.
@@ -64,8 +64,7 @@ impl QueryIndex {
         let mut occurrences_by_name = BTreeMap::new();
         let mut enclosed = BTreeMap::new();
         let mut top_level = BTreeMap::new();
-        let mut occurrences_by_location: BTreeMap<String, BTreeMap<Span, Vec<usize>>> =
-            BTreeMap::new();
+        let mut occurrences_by_location = BTreeMap::new();
         let mut file_hashes: BTreeMap<String, Arc<str>> = BTreeMap::new();
         for (i, occurrence) in view.snapshot.syntax.occurrences.iter().enumerate() {
             push(&mut occurrences_by_name, &occurrence.name, i);
@@ -73,15 +72,7 @@ impl QueryIndex {
                 Some(symbol) => push(&mut enclosed, symbol, i),
                 None => push(&mut top_level, &occurrence.file, i),
             }
-            if !occurrences_by_location.contains_key(occurrence.file.as_str()) {
-                occurrences_by_location.insert(occurrence.file.clone(), BTreeMap::new());
-            }
-            occurrences_by_location
-                .get_mut(occurrence.file.as_str())
-                .unwrap()
-                .entry(occurrence.span)
-                .or_default()
-                .push(i);
+            push(&mut occurrences_by_location, &occurrence.file, i);
             if !file_hashes.contains_key(occurrence.file.as_str()) {
                 let hash = view
                     .snapshot
@@ -91,6 +82,9 @@ impl QueryIndex {
                     .map_or("", |file| file.file_hash.as_str());
                 file_hashes.insert(occurrence.file.clone(), hash.into());
             }
+        }
+        for offsets in occurrences_by_location.values_mut() {
+            offsets.sort_by_key(|&offset| view.snapshot.syntax.occurrences[offset].span);
         }
         Self {
             explicit: IndexedView::new(view, explicit),
@@ -107,13 +101,8 @@ impl QueryIndex {
     }
 
     /// Build the relations of one occurrence, optionally only those ending at
-    /// `only_target`, keyed by id so repeats collapse.
-    fn derive(
-        &self,
-        occurrence: usize,
-        only_target: Option<&str>,
-        out: &mut BTreeMap<String, Relation>,
-    ) {
+    /// `only_target`, appending candidates for ordered deduplication later.
+    fn derive(&self, occurrence: usize, only_target: Option<&str>, out: &mut Vec<Relation>) {
         let syntax = &self.explicit.view().snapshot.syntax;
         let occurrence = &syntax.occurrences[occurrence];
         let Some(targets) = self.symbols_by_name.get(occurrence.name.as_str()) else {
@@ -122,11 +111,17 @@ impl QueryIndex {
         let caller = l1_caller(occurrence);
         let span = serde_json::to_string(&occurrence.span).unwrap();
         let file_hash = &self.file_hashes[occurrence.file.as_str()];
-        for &target in targets {
-            let symbol = &syntax.symbols[target];
-            if only_target.is_some_and(|id| symbol.symbol_id != id)
-                || !l1_applies(occurrence, symbol)
-            {
+        let selected = only_target.and_then(|id| self.symbol(id));
+        let candidates = if only_target.is_some() {
+            &[][..]
+        } else {
+            targets.as_slice()
+        };
+        for symbol in selected
+            .into_iter()
+            .chain(candidates.iter().map(|&offset| &syntax.symbols[offset]))
+        {
+            if !l1_applies(occurrence, symbol) {
                 continue;
             }
             let relation = l1_relation(
@@ -136,7 +131,7 @@ impl QueryIndex {
                 symbol,
                 [&self.indexer, &self.derivation, file_hash],
             );
-            out.insert(relation.relation_id.clone(), relation);
+            out.push(relation);
         }
     }
 
@@ -161,14 +156,14 @@ impl QueryIndex {
 
     /// Relations incident to `id` in relation-id order; a self-loop appears once.
     pub fn adjacent(&self, id: &str, direction: Direction) -> Vec<Relation> {
-        let mut edges = BTreeMap::new();
+        let mut derived = Vec::new();
         if direction != Direction::Incoming {
             for &o in self.enclosed.get(id).into_iter().flatten() {
-                self.derive(o, None, &mut edges);
+                self.derive(o, None, &mut derived);
             }
             if let Some(file) = id.strip_prefix("file:") {
                 for &o in self.top_level.get(file).into_iter().flatten() {
-                    self.derive(o, None, &mut edges);
+                    self.derive(o, None, &mut derived);
                 }
             }
         }
@@ -180,34 +175,60 @@ impl QueryIndex {
                     .into_iter()
                     .flatten()
                 {
-                    self.derive(o, Some(id), &mut edges);
+                    self.derive(o, Some(id), &mut derived);
                 }
             }
         }
-        for explicit in self.explicit.adjacent(id, direction) {
-            match edges.get_mut(&explicit.relation_id) {
-                Some(derived) => overlay(derived, explicit),
-                None => {
-                    edges.insert(explicit.relation_id.clone(), explicit.clone());
+        derived.sort_unstable_by(|left, right| left.relation_id.cmp(&right.relation_id));
+        derived.dedup_by(|left, right| left.relation_id == right.relation_id);
+
+        let mut derived = derived.into_iter().peekable();
+        let mut explicit = self.explicit.adjacent(id, direction).peekable();
+        let mut edges = Vec::new();
+        loop {
+            match (derived.peek(), explicit.peek()) {
+                (Some(left), Some(right)) => match left.relation_id.cmp(&right.relation_id) {
+                    std::cmp::Ordering::Less => edges.push(derived.next().unwrap()),
+                    std::cmp::Ordering::Greater => edges.push(explicit.next().unwrap().clone()),
+                    std::cmp::Ordering::Equal => {
+                        let mut relation = derived.next().unwrap();
+                        overlay(&mut relation, explicit.next().unwrap());
+                        edges.push(relation);
+                    }
+                },
+                (Some(_), None) => {
+                    edges.extend(derived.by_ref());
+                    break;
                 }
+                (None, Some(_)) => {
+                    edges.extend(explicit.by_ref().cloned());
+                    break;
+                }
+                (None, None) => break,
             }
         }
-        edges.into_values().collect()
+        edges
     }
 
     /// Relations anchored at a current-source location. A relation whose final
     /// origin is an older snapshot has no current coordinates and is excluded.
     pub fn relations_at(&self, file: &str, span: Span) -> Vec<Relation> {
-        let mut edges = BTreeMap::new();
-        for &o in self
+        let mut derived = Vec::new();
+        let offsets = self
             .occurrences_by_location
             .get(file)
-            .and_then(|spans| spans.get(&span))
-            .into_iter()
-            .flatten()
-        {
-            self.derive(o, None, &mut edges);
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let occurrences = &self.view().snapshot.syntax.occurrences;
+        let begin = offsets.partition_point(|&offset| occurrences[offset].span < span);
+        let end = offsets.partition_point(|&offset| occurrences[offset].span <= span);
+        for &o in &offsets[begin..end] {
+            self.derive(o, None, &mut derived);
         }
+        let mut edges = derived
+            .into_iter()
+            .map(|relation| (relation.relation_id.clone(), relation))
+            .collect::<BTreeMap<_, _>>();
         for derived in edges.values_mut() {
             if let Some(explicit) = self.explicit.relation(&derived.relation_id) {
                 overlay(derived, explicit);
@@ -230,17 +251,6 @@ impl QueryIndex {
                 })
                 .sum()
         }
-        let locations: usize = self
-            .occurrences_by_location
-            .iter()
-            .map(|(file, spans)| {
-                file.capacity()
-                    + spans
-                        .values()
-                        .map(|offsets| offsets.capacity() * std::mem::size_of::<usize>() + 120)
-                        .sum::<usize>()
-            })
-            .sum();
         let names: usize = self
             .names_by_symbol_id
             .iter()
@@ -253,7 +263,7 @@ impl QueryIndex {
             + keyed(&self.occurrences_by_name)
             + keyed(&self.enclosed)
             + keyed(&self.top_level)
-            + locations
+            + keyed(&self.occurrences_by_location)
             + names
             + self
                 .file_hashes

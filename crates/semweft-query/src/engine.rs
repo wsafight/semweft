@@ -10,7 +10,7 @@ use semweft_core::*;
 use semweft_store::{IndexedView, PublicationRef, SnapshotStore};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -32,6 +32,8 @@ pub struct StoredView {
     full: Arc<OnceLock<IndexedView>>,
     api_surface: Arc<OnceLock<crate::api_surface::Inventory>>,
     weight: Arc<AtomicUsize>,
+    snapshot_weight: Arc<OnceLock<usize>>,
+    semantic_weight: Arc<OnceLock<usize>>,
     deriver: Arc<Mutex<RelationDeriver>>,
 }
 impl StoredView {
@@ -87,9 +89,8 @@ impl StoredView {
                 );
             }
         }
-        let weight =
-            semweft_store::payload_bytes(&(&view, &references, &reference_gaps, &namespaces))
-                .saturating_mul(2);
+        let weight = semweft_store::payload_bytes(&(&references, &reference_gaps, &namespaces))
+            .saturating_mul(2);
         Self {
             view,
             references: Arc::new(references),
@@ -99,6 +100,8 @@ impl StoredView {
             full: Arc::new(OnceLock::new()),
             api_surface: Arc::new(OnceLock::new()),
             weight: Arc::new(AtomicUsize::new(weight)),
+            snapshot_weight: Arc::new(OnceLock::new()),
+            semantic_weight: Arc::new(OnceLock::new()),
             deriver: Arc::new(Mutex::new(RelationDeriver::default())),
         }
     }
@@ -164,6 +167,8 @@ struct QueryViews {
     hits: u64,
     misses: u64,
     evictions: u64,
+    resident_views: HashSet<usize>,
+    resident_snapshots: HashSet<usize>,
 }
 impl Default for QueryViews {
     fn default() -> Self {
@@ -175,14 +180,55 @@ impl Default for QueryViews {
             hits: 0,
             misses: 0,
             evictions: 0,
+            resident_views: HashSet::new(),
+            resident_snapshots: HashSet::new(),
         }
     }
 }
 impl QueryViews {
     fn bytes(&self) -> usize {
-        self.items.values().fold(0usize, |sum, item| {
-            sum.saturating_add(item.weight.load(Ordering::Relaxed))
+        let mut seen_snapshots = HashSet::new();
+        let mut seen_views = HashSet::new();
+        self.items.values().fold(0usize, |mut sum, item| {
+            sum = sum.saturating_add(item.weight.load(Ordering::Relaxed));
+            let snapshot = Arc::as_ptr(&item.view.snapshot) as usize;
+            if !self.resident_snapshots.contains(&snapshot) && seen_snapshots.insert(snapshot) {
+                sum = sum.saturating_add(*item.snapshot_weight.get_or_init(|| {
+                    semweft_store::payload_bytes(&item.view.snapshot).saturating_mul(2)
+                }));
+            }
+            let view = Arc::as_ptr(&item.view) as usize;
+            if !self.resident_views.contains(&view) && seen_views.insert(view) {
+                sum = sum.saturating_add(*item.semantic_weight.get_or_init(|| {
+                    semweft_store::payload_bytes(&(
+                        &item.view.epochs,
+                        &item.view.relations,
+                        &item.view.pending_units,
+                        &item.view.known_gaps,
+                        &item.view.resolutions,
+                    ))
+                    .saturating_mul(2)
+                }));
+            }
+            sum
         })
+    }
+    fn set_resident(&mut self, views: &[Arc<AnalysisView>]) {
+        if views.len() == self.resident_views.len()
+            && views
+                .iter()
+                .all(|view| self.resident_views.contains(&(Arc::as_ptr(view) as usize)))
+        {
+            return;
+        }
+        self.resident_views = views
+            .iter()
+            .map(|view| Arc::as_ptr(view) as usize)
+            .collect();
+        self.resident_snapshots = views
+            .iter()
+            .map(|view| Arc::as_ptr(&view.snapshot) as usize)
+            .collect();
     }
     fn trim(&mut self) {
         while self.items.len() > self.max_views || self.bytes() > self.max_bytes {
@@ -241,11 +287,13 @@ pub struct State {
     query_views: QueryViews,
     store: SnapshotStore,
     dirty_extra: BTreeSet<String>,
+    capture_diagnostics: Option<(String, Vec<Diagnostic>)>,
     deriver: Arc<Mutex<RelationDeriver>>,
 }
 
 impl State {
     fn load_version(&mut self, version: &(String, u64)) -> Result<Arc<AnalysisView>> {
+        self.query_views.set_resident(self.coordinator.retained());
         let cache_key = format!("{}:{}", version.0, version.1);
         if let Some(stored) = self.query_views.get(&cache_key) {
             return Ok(stored.view);
@@ -297,6 +345,7 @@ impl State {
     }
 
     fn stored_view(&mut self, view: Arc<AnalysisView>) -> Result<StoredView> {
+        self.query_views.set_resident(self.coordinator.retained());
         let key = view_key(&view);
         if let Some(stored) = self.query_views.get(&key) {
             return Ok(stored);
@@ -440,6 +489,7 @@ impl Engine {
                 query_views,
                 store,
                 dirty_extra: BTreeSet::new(),
+                capture_diagnostics: None,
                 deriver: Arc::new(Mutex::new(RelationDeriver::default())),
             }),
             changed: Condvar::new(),
@@ -545,34 +595,41 @@ impl Engine {
         self.scan_inner(force, true)
     }
     fn scan_inner(&self, force: bool, semantic: bool) -> Result<Arc<AnalysisView>> {
-        self.scan_using(force, semantic, |resolved, backend| {
+        self.scan_using(force, semantic, true, |resolved, backend, verify| {
             self.capture_cache
                 .lock()
                 .unwrap()
-                .capture(resolved, backend, true)
+                .capture(resolved, backend, verify)
         })
     }
     pub fn invalidate_inputs(&self, paths: &[PathBuf], full: bool) {
         self.capture_cache.locked().invalidate(paths, full);
     }
     pub fn scan_incremental(&self) -> Result<Arc<AnalysisView>> {
-        self.scan_using(false, true, |resolved, backend| {
+        self.scan_using(false, true, false, |resolved, backend, verify| {
             self.capture_cache
                 .lock()
                 .unwrap()
-                .capture(resolved, backend, false)
+                .capture(resolved, backend, verify)
         })
     }
     fn scan_using(
         &self,
         force: bool,
         semantic: bool,
-        mut capture: impl FnMut(&Resolved, &str) -> Result<workspace::Capture>,
+        first_capture_verifies_content: bool,
+        mut capture: impl FnMut(&Resolved, &str, bool) -> Result<workspace::Capture>,
     ) -> Result<Arc<AnalysisView>> {
+        let _timing = crate::timing::Timing::new("scan");
         let _writer = self.writer.locked();
-        let (previous_config, backend) = {
+        let (previous_config, backend, previous_view, previous_diagnostics) = {
             let state = self.state.locked();
-            (state.resolved.clone(), state.backend.clone())
+            (
+                state.resolved.clone(),
+                state.backend.clone(),
+                state.coordinator.latest(),
+                state.capture_diagnostics.clone(),
+            )
         };
         let updated = config::resolve(
             Some(&previous_config.root),
@@ -581,16 +638,43 @@ impl Engine {
         if updated.index_dir != previous_config.index_dir {
             bail!("config_conflict: index.directory changed; stop the daemon before reconnecting");
         }
-        let captured = capture(&updated, &backend)?;
-        let mut syntax = self
-            .parser
-            .lock()
-            .unwrap()
-            .analyze(&captured.manifest)
-            .map_err(anyhow::Error::msg)?;
-        let verified = capture(&updated, &backend)?;
+        let captured = {
+            let _timing = crate::timing::Timing::new("capture");
+            capture(&updated, &backend, first_capture_verifies_content)?
+        };
+        let reusable = previous_view.filter(|previous| {
+            previous.snapshot.manifest == captured.manifest
+                && previous_diagnostics
+                    .as_ref()
+                    .is_some_and(|(snapshot, diagnostics)| {
+                        snapshot == &previous.snapshot.snapshot_id
+                            && diagnostics == &captured.diagnostics
+                    })
+        });
+        let syntax = if reusable.is_none() {
+            let _timing = crate::timing::Timing::new("parse");
+            Some(
+                self.parser
+                    .locked()
+                    .analyze(&captured.manifest)
+                    .map_err(anyhow::Error::msg)?,
+            )
+        } else {
+            None
+        };
+        let verify_content = syntax.is_some() || !cfg!(unix);
+        let verified = {
+            let stage = if verify_content {
+                "verify_capture"
+            } else {
+                "verify_metadata"
+            };
+            let _timing = crate::timing::Timing::new(stage);
+            capture(&updated, &backend, verify_content)?
+        };
         let checked_config = config::resolve(Some(&updated.root), updated.config_path.as_deref())?;
         if verified.manifest != captured.manifest
+            || verified.diagnostics != captured.diagnostics
             || checked_config.analysis_hash() != updated.analysis_hash()
         {
             return Err(InputsChanged.into());
@@ -609,19 +693,30 @@ impl Engine {
             *self.execution.locked() = Arc::new(lsp::Cancellation::default());
         }
         state.authorized = trusted;
-        syntax.diagnostics.extend(captured.diagnostics);
-        if !trusted {
-            syntax.diagnostics.push(Diagnostic { code:"semantic_untrusted".into(), file:None, message:"Resident semantic tool execution is blocked; verified imported evidence remains queryable. Authorize execution with semweft trust --accept-build-execution".into() });
-        }
         let previous = state
             .coordinator
             .latest()
             .map(|v| v.snapshot.snapshot_id.clone());
         let semantic_base = state.coordinator.latest_current();
-        let view = state
-            .coordinator
-            .publish_inputs(captured.manifest, syntax)
-            .map_err(anyhow::Error::msg)?;
+        let view = if let Some(mut syntax) = syntax {
+            syntax.diagnostics.extend(captured.diagnostics.clone());
+            if !trusted {
+                syntax.diagnostics.push(Diagnostic { code:"semantic_untrusted".into(), file:None, message:"Resident semantic tool execution is blocked; verified imported evidence remains queryable. Authorize execution with semweft trust --accept-build-execution".into() });
+            }
+            state
+                .coordinator
+                .publish_inputs(captured.manifest, syntax)
+                .map_err(anyhow::Error::msg)?
+        } else {
+            state
+                .coordinator
+                .latest()
+                .filter(|view| {
+                    view.snapshot.snapshot_id == reusable.as_ref().unwrap().snapshot.snapshot_id
+                })
+                .unwrap_or_else(|| reusable.unwrap())
+        };
+        state.capture_diagnostics = Some((view.snapshot.snapshot_id.clone(), captured.diagnostics));
         let changed = previous.as_deref() != Some(&view.snapshot.snapshot_id);
         if changed {
             state.refresh_error = None;
@@ -939,6 +1034,7 @@ impl Engine {
     }
 
     pub fn bind(&self, args: &Value, deadline: Instant) -> Result<(StoredView, Value)> {
+        let _timing = crate::timing::Timing::new("bind");
         let requested = args["require_fresh"].as_bool().unwrap_or(false);
         let pinned = args.get("semantic_epoch").is_some();
         let wait_ms = args["fresh_wait_ms"]
@@ -1046,9 +1142,11 @@ impl Engine {
             state.coordinator.latest()
         };
         let trusted = state.resolved.trusted()?;
+        let resident = state.coordinator.retained().to_vec();
+        state.query_views.set_resident(&resident);
         state.query_views.trim();
         let storage = json!({"runtime":state.store.metrics(),"max_disk_bytes":state.resolved.config.index.max_disk_bytes,"retained_publications":state.store.entries().count(),"pins":state.store.pins(),"epoch_high_water":state.store.high_water(),"journal_sequence":state.store.journal_sequence(),
-            "query_cache":{"views":state.query_views.items.len(),"estimated_bytes":state.query_views.bytes(),"max_views":state.query_views.max_views,"max_bytes":state.query_views.max_bytes,"hits":state.query_views.hits,"misses":state.query_views.misses,"evictions":state.query_views.evictions}});
+            "query_cache":{"views":state.query_views.items.len(),"estimated_bytes":state.query_views.bytes(),"max_views":state.query_views.max_views,"max_bytes":state.query_views.max_bytes,"hits":state.query_views.hits,"misses":state.query_views.misses,"evictions":state.query_views.evictions,"shared_resident_views":state.query_views.resident_views.len(),"accounting":"query allocations and unique historical facts; refresh-resident facts excluded"}});
         let store = state.store.clone();
         let mut result = json!({"storage":storage,"schema_version":"0.1","workspace_id":state.resolved.workspace_id,"snapshot_id":view.as_ref().map(|v| &v.snapshot.snapshot_id),"epochs":view.as_ref().map(|v| json!({"syntax":v.epochs.syntax_epoch,"semantic":v.epochs.semantic_epoch})),
             "manifest":view.as_ref().map(|v| json!({"input_hash":v.snapshot.input_hash,"scope":v.snapshot.manifest.scope,"analysis_versions":v.snapshot.manifest.analysis_versions,"files":v.snapshot.manifest.files.iter().map(|(path,file)| json!({"path":path,"file_hash":file.file_hash})).collect::<Vec<_>>(),"binary_files":v.snapshot.manifest.binary_files})),
@@ -1920,9 +2018,11 @@ mod index_tests {
     fn cache_enforces_byte_budget_and_rechecks_lazy_index_growth() {
         let first = stored("bytes-a", 0);
         let second = stored("bytes-b", 0);
-        let budget =
-            first.weight.load(Ordering::Relaxed) + second.weight.load(Ordering::Relaxed) - 1;
         let mut cache = QueryViews::default();
+        cache.set_limits(8, usize::MAX);
+        cache.insert(first.clone());
+        cache.insert(second.clone());
+        let budget = cache.bytes() - 1;
         cache.set_limits(8, budget);
         cache.insert(first.clone());
         cache.insert(second.clone());
@@ -1937,6 +2037,33 @@ mod index_tests {
         cache.insert(first.clone());
         assert!(cache.items.is_empty());
         assert_eq!(first.index().view().snapshot.snapshot_id, "bytes-a");
+    }
+
+    #[test]
+    fn cache_charges_historical_snapshots_once_and_excludes_refresh_resident_facts() {
+        let first = stored("shared", 0);
+        let mut next = first.clone();
+        let mut view = (*first.view).clone();
+        view.epochs.semantic_epoch = 1;
+        next.view = Arc::new(view);
+        next.snapshot_weight = Arc::new(OnceLock::new());
+        next.semantic_weight = Arc::new(OnceLock::new());
+        let mut cache = QueryViews::default();
+        cache.set_limits(8, usize::MAX);
+        cache.insert(first.clone());
+        let first_bytes = cache.bytes();
+        cache.insert(next.clone());
+        let combined = cache.bytes();
+        assert!(combined < first_bytes * 2);
+        cache.set_resident(std::slice::from_ref(&first.view));
+        let owned = first.weight.load(Ordering::Relaxed) + next.weight.load(Ordering::Relaxed);
+        assert_eq!(cache.bytes(), owned + next.semantic_weight.get().unwrap());
+        cache.set_resident(&[first.view.clone(), next.view.clone()]);
+        assert_eq!(cache.bytes(), owned);
+        cache.set_resident(&[]);
+        assert_eq!(cache.bytes(), combined);
+        cache.trim();
+        assert_eq!(cache.items.len(), 2);
     }
 
     #[test]
@@ -2026,13 +2153,30 @@ mod index_tests {
         let resolved = config::resolve(Some(temp.path()), Some(&config_path)).unwrap();
         let engine = Engine::new(resolved).unwrap();
         let first = engine
-            .scan_using(false, false, |resolved, backend| {
+            .scan_using(false, false, true, |resolved, backend, _| {
                 assert!(engine.state.try_lock().is_ok());
                 workspace::capture_config(resolved, backend)
             })
             .unwrap();
+        let mut verification_modes = Vec::new();
+        let unchanged = engine
+            .scan_using(false, false, true, |resolved, backend, verify| {
+                verification_modes.push(verify);
+                workspace::capture_config(resolved, backend)
+            })
+            .unwrap();
+        assert_eq!(verification_modes, [true, !cfg!(unix)]);
+        assert!(Arc::ptr_eq(&first, &unchanged));
+        let parser = engine.parser.locked();
+        let (completed, result) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| completed.send(engine.scan(false)).unwrap());
+            let unchanged = result.recv_timeout(Duration::from_secs(2));
+            drop(parser);
+            assert!(Arc::ptr_eq(&first, &unchanged.unwrap().unwrap()));
+        });
         let mut calls = 0;
-        let failed = engine.scan_using(false, false, |resolved, backend| {
+        let failed = engine.scan_using(false, false, true, |resolved, backend, _| {
             assert!(engine.state.try_lock().is_ok());
             calls += 1;
             let result = workspace::capture_config(resolved, backend)?;
@@ -2042,6 +2186,7 @@ mod index_tests {
             Ok(result)
         });
         assert!(failed.unwrap_err().to_string().contains("inputs changed"));
+        assert_eq!(calls, 2);
         assert_eq!(
             engine
                 .state
@@ -2056,7 +2201,7 @@ mod index_tests {
         );
         let mut captures = 0;
         let stable = retry_input_changes(Instant::now() + Duration::from_secs(2), || {
-            engine.scan_using(false, false, |resolved, backend| {
+            engine.scan_using(false, false, true, |resolved, backend, _| {
                 let captured = workspace::capture_config(resolved, backend)?;
                 captures += 1;
                 if captures == 1 {

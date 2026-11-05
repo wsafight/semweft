@@ -1,7 +1,7 @@
 //! Structural summaries use the same immutable facts as navigation queries.
 use crate::{
     engine::{self, StoredView},
-    query,
+    query, workspace,
 };
 use anyhow::Result;
 use semweft_core::*;
@@ -66,10 +66,7 @@ pub fn repo_map(
                 .or_default()
                 .push(symbol);
         }
-        for path in files
-            .keys()
-            .filter(|p| p.ends_with(".rs") || p.ends_with(".go") || crate::web::is_source(p))
-        {
+        for path in files.keys().filter(|p| workspace::is_source(p)) {
             query::check_deadline(deadline)?;
             if !included(path, args) {
                 continue;
@@ -486,7 +483,7 @@ fn health(stored: &StoredView, relations: &[Relation], deadline: Instant) -> Res
         .manifest
         .files
         .keys()
-        .filter(|p| p.ends_with(".rs") || p.ends_with(".go") || crate::web::is_source(p))
+        .filter(|p| workspace::is_source(p))
         .count();
     let failed = facts
         .diagnostics

@@ -7,6 +7,15 @@ use std::path::{Component, Path, PathBuf};
 
 pub const DAEMON_PROTOCOL: &str = "0.1";
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DesktopEndpoint {
+    pub protocol: String,
+    pub workspace: PathBuf,
+    pub workspace_id: String,
+    pub config_hash: String,
+    pub endpoint: String,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct DaemonRequest {
     pub protocol: String,

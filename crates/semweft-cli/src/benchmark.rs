@@ -14,7 +14,7 @@ pub fn capture(mut resolved: Resolved, revisions: u32) -> Result<semweft_bench::
     let edited_file = manifest
         .files
         .keys()
-        .find(|path| path.ends_with(".rs") || path.ends_with(".go") || crate::web::is_source(path))
+        .find(|path| workspace::is_source(path))
         .cloned()
         .context("invalid_argument: benchmark needs a captured source file")?;
     Ok(semweft_bench::StorageInput {

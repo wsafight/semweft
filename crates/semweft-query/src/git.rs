@@ -48,6 +48,21 @@ fn run(root: &Path, args: &[&str]) -> Result<String> {
     }
     Ok(String::from_utf8(output.stdout)?.trim().into())
 }
+
+/// Run Git with the shared external-tool policy: spooled streams, process-group
+/// termination and the query deadline. Used by callers that need the raw output.
+pub fn output(root: &Path, args: &[&str], deadline: Instant) -> Result<String> {
+    let mut cmd = command(root);
+    cmd.args(args);
+    let output = crate::process::output(&mut cmd, deadline)?;
+    if !output.status.success() {
+        bail!(
+            "invalid_argument: Git failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8(output.stdout)?)
+}
 fn revision(root: &Path, name: &str) -> Result<String> {
     if name.is_empty() || name == "WORKTREE" {
         bail!("invalid_argument: invalid revision selector");
@@ -784,7 +799,6 @@ pub fn impact(service: &QueryService, args: &Value, deadline: Instant) -> Result
         }
     }
     let mut edges = BTreeMap::new();
-    let mut raw = BTreeMap::new();
     let mut frontier = BTreeSet::new();
     let mut reason = None;
     let mut direct = BTreeSet::new();
@@ -820,10 +834,6 @@ pub fn impact(service: &QueryService, args: &Value, deadline: Instant) -> Result
                 }
                 nodes.insert(from);
                 nodes.insert(to);
-                let mut value = query::relation_value(&relation, stored);
-                value["side"] = json!(side);
-                value["depth"] = json!(depth);
-                value["path"] = json!(path);
                 let caller = if side == "head" {
                     canonical
                         .get(&relation.from_symbol)
@@ -841,10 +851,9 @@ pub fn impact(service: &QueryService, args: &Value, deadline: Instant) -> Result
                 let key = (side, relation.relation_id.clone());
                 if edges
                     .get(&key)
-                    .is_none_or(|old: &Value| old["depth"].as_u64().unwrap_or(u64::MAX) > depth)
+                    .is_none_or(|(_, old_depth, _)| *old_depth > depth)
                 {
-                    edges.insert(key.clone(), value);
-                    raw.insert(key, relation);
+                    edges.insert(key, (relation, depth, path));
                 }
             }
         }
@@ -892,14 +901,25 @@ pub fn impact(service: &QueryService, args: &Value, deadline: Instant) -> Result
     if !config_changes.is_empty() {
         result["completeness"]["known_gaps"].as_array_mut().unwrap().push(json!({"kind":"configuration_change_requires_review","files":config_changes,"reason":"Build configuration changes can affect unchanged declarations; symbol diff impact is not exhaustive"}));
     }
-    result["relations"] = json!(edges.into_values().collect::<Vec<_>>());
     result["frontier"] = json!(frontier);
     let basis = match reason {
         Some("timeout" | "node_limit") => "partial",
         Some(_) => "within_limits",
         None => "complete",
     };
-    result["evidence_summary"] = query::summary(&raw.into_values().collect::<Vec<_>>(), basis);
+    result["evidence_summary"] =
+        query::summary_refs(edges.values().map(|(relation, _, _)| relation), basis);
+    result["relations"] = json!(
+        edges
+            .into_iter()
+            .map(|((side, _), edge)| {
+                let mut value =
+                    query::graph_value(&edge, if side == "head" { &head } else { &base });
+                value["side"] = json!(side);
+                value
+            })
+            .collect::<Vec<_>>()
+    );
     result["summary"] = json!({"changed_symbols":result["changes"].as_array().unwrap().len(),"direct_callers":direct.len(),"transitive_callers":callers.len(),"services":null,"tests_to_run":null,"risk":null});
     if let Some(reason) = reason {
         result["output"] = json!({"truncated":true,"truncation_reason":reason,"remaining_relations":null,"continuation":{"kind":"requery","frontier":frontier,"suggested":{"depth":(args["depth"].as_u64().unwrap_or(3)+1).min(10)}}});

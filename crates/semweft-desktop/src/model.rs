@@ -132,6 +132,7 @@ pub struct Preview {
     pub review_key: String,
     pub branch: Option<String>,
     pub symbols: Symbols,
+    pub base_symbols: Symbols,
     pub map: Structure,
     pub module_map: Structure,
     pub churn: BTreeMap<String, Churn>,
@@ -169,6 +170,52 @@ pub struct FileMetric {
 }
 
 impl Preview {
+    pub fn fixed_diff(&self) -> Option<Value> {
+        let selector = |side: &str| -> Option<Value> {
+            let snapshot = &self.impact.snapshots[side];
+            Some(
+                serde_json::json!({"kind":"snapshot","snapshot_id":snapshot["snapshot_id"].as_str()?,"semantic_epoch":snapshot["epochs"]["semantic"].as_u64()?}),
+            )
+        };
+        Some(serde_json::json!({"base":selector("base")?,"head":selector("head")?}))
+    }
+
+    pub fn sources_on(&self, side: &str) -> &BTreeMap<String, String> {
+        if side == "base" {
+            &self.base_sources
+        } else {
+            &self.sources
+        }
+    }
+
+    pub fn symbols_on(&self, side: &str) -> &Symbols {
+        if side == "base" {
+            &self.base_symbols
+        } else {
+            &self.symbols
+        }
+    }
+
+    pub fn verify_location_on(&self, location: &Location, side: &str) -> Result<()> {
+        let source = self
+            .sources_on(side)
+            .get(&location.file)
+            .context("此侧没有捕获对应源码")?;
+        ensure!(
+            !location.file_hash.is_empty() && semweft_shared::digest(source) == location.file_hash,
+            "content_mismatch: 位置与此侧源码内容不同"
+        );
+        semweft_shared::byte_offset(
+            source,
+            semweft_shared::Position {
+                line: u32::try_from(location.line)?,
+                column: u32::try_from(location.column)?,
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
+        Ok(())
+    }
+
     pub fn source_hash(&self, file: &str) -> Result<String> {
         let source = self.sources.get(file).context("当前快照没有捕获对应源码")?;
         Ok(semweft_shared::digest(source))
@@ -317,12 +364,73 @@ pub struct Bookmark {
     pub file: String,
     pub line: usize,
     pub label: String,
+    #[serde(default)]
+    pub side: String,
+}
+
+impl Bookmark {
+    /// Legacy bookmarks have no side; they belong to the head source.
+    pub fn effective_side(&self) -> &str {
+        if self.side.is_empty() { "head" } else { &self.side }
+    }
+
+    pub fn matches_location(&self, file: &str, line: usize, side: &str) -> bool {
+        self.file == file && self.line == line && self.effective_side() == side
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SourceTab {
+    pub file: String,
+    pub line: usize,
+    pub side: String,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SourceNote {
+    pub file: String,
+    pub side: String,
+    pub file_hash: String,
+    pub line: usize,
+    pub text: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GraphLayout {
+    pub zoom: f32,
+    pub pan: (f32, f32),
+    pub positions: BTreeMap<String, (f32, f32)>,
+    pub collapsed: BTreeSet<String>,
+    pub grouped: bool,
+    pub mode: usize,
+}
+impl Default for GraphLayout {
+    fn default() -> Self {
+        Self {
+            zoom: 1.,
+            pan: (0., 0.),
+            positions: BTreeMap::new(),
+            collapsed: BTreeSet::new(),
+            grouped: false,
+            mode: 0,
+        }
+    }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
     pub workspace: PathBuf,
     pub bookmarks: Vec<Bookmark>,
+    pub tabs: Vec<SourceTab>,
+    pub active: Option<SourceTab>,
+    pub outline_visible: Option<bool>,
+    pub history: Vec<SourceTab>,
+    pub history_position: usize,
+    pub file_panel_width: Option<f32>,
+    pub outline_width: Option<f32>,
+    pub compare_sources: bool,
+    pub source_notes: Vec<SourceNote>,
+    pub graph_layouts: BTreeMap<String, GraphLayout>,
 }
 impl Session {
     pub fn path(data: &Path, workspace: &Path) -> PathBuf {
@@ -488,6 +596,54 @@ impl LocalMarks {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn base_and_head_source_identities_never_cross() {
+        let mut data = super::Preview::default();
+        data.sources
+            .insert("src/lib.rs".into(), "fn head() {}".into());
+        data.base_sources
+            .insert("src/lib.rs".into(), "fn base() {}".into());
+        let location = super::Location {
+            file: "src/lib.rs".into(),
+            line: 1,
+            column: 4,
+            file_hash: semweft_shared::digest("fn base() {}"),
+        };
+        assert!(data.verify_location_on(&location, "base").is_ok());
+        assert!(data.verify_location_on(&location, "head").is_err());
+        assert!(data.fixed_diff().is_none());
+        data.impact.snapshots = serde_json::json!({"base":{"snapshot_id":"before","epochs":{"semantic":2}},"head":{"snapshot_id":"after","epochs":{"semantic":3}}});
+        assert_eq!(data.fixed_diff().unwrap()["base"]["semantic_epoch"], 2);
+    }
+
+    #[test]
+    fn session_keeps_side_specific_tabs_and_reads_old_bookmarks() {
+        let session: super::Session = serde_json::from_value(
+            serde_json::json!({"bookmarks":[{"file":"src/lib.rs","line":3,"label":"old"}]}),
+        )
+        .unwrap();
+        assert_eq!(session.bookmarks[0].side, "");
+        assert!(session.tabs.is_empty());
+        let mut session = session;
+        session.tabs = vec![
+            super::SourceTab {
+                file: "src/lib.rs".into(),
+                line: 2,
+                side: "base".into(),
+            },
+            super::SourceTab {
+                file: "src/lib.rs".into(),
+                line: 7,
+                side: "head".into(),
+            },
+        ];
+        session.active = Some(session.tabs[1].clone());
+        let restored: super::Session =
+            serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+        assert_eq!(restored.tabs, session.tabs);
+        assert_eq!(restored.active.unwrap().side, "head");
+    }
+
     use super::*;
 
     #[test]

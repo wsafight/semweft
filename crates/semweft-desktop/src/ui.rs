@@ -1,7 +1,7 @@
 use crate::{
     client,
     input::TextInput,
-    model::{Bookmark, LocalMarks, Preview, SearchHit, Session, Symbol},
+    model::{Bookmark, LocalMarks, Preview, SearchHit, Session, SourceTab, Symbol},
     source::SourceDocument,
 };
 use anyhow::{Context as _, Result, bail, ensure};
@@ -13,10 +13,14 @@ use gpui::{
 };
 use gpui_rsx::{rsx, rsx_fragment};
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, fs, path::PathBuf, process::Command};
+use std::{collections::BTreeSet, fs, path::PathBuf};
 
+mod analysis_view;
 mod components;
+mod diff_view;
+mod explorer;
 mod file_tree;
+mod graph_view;
 mod icons;
 #[cfg(test)]
 mod rsx_compat_tests;
@@ -63,6 +67,8 @@ enum Page {
     Graph,
     Metrics,
     Bookmarks,
+    Analysis,
+    Explorer,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -77,9 +83,10 @@ struct Launch {
     data: PathBuf,
     repository: PathBuf,
     check_ui: bool,
-    exporter: PathBuf,
-    python: String,
+    keep_open: bool,
     workspace: Option<PathBuf>,
+    example: bool,
+    review_id: Option<String>,
 }
 
 impl Launch {
@@ -92,31 +99,93 @@ impl Launch {
             .ok()
             .and_then(|v| serde_json::from_slice(&v).ok())
             .unwrap_or(Value::Null);
+        let bundled = resources.join("config.json").is_file();
         let root = config["repository"]
             .as_str()
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."));
+            .unwrap_or_else(|| {
+                if bundled {
+                    resources.clone()
+                } else {
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+                }
+            });
+        let storage = if let Some(storage) = std::env::var_os("SEMWEFT_DESKTOP_DATA_DIR") {
+            PathBuf::from(storage)
+        } else if bundled {
+            PathBuf::from(std::env::var_os("HOME").context("HOME is required")?)
+                .join("Library/Application Support/Semweft")
+        } else {
+            root.join("target/desktop-preview")
+        };
         let mut options = Self {
             repository: root.clone(),
             check_ui: false,
-            data: root.join("target/desktop-preview/data.json"),
-            exporter: root.join("crates/semweft-desktop/scripts/export_preview.py"),
-            python: config["python"].as_str().unwrap_or("python3").to_owned(),
-            workspace: config["workspace"].as_str().map(PathBuf::from),
+            keep_open: false,
+            data: storage.join("data.json"),
+            workspace: None,
+            example: false,
+            review_id: None,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--check-ui" => options.check_ui = true,
+                "--check-ui-keep-open" => {
+                    options.check_ui = true;
+                    options.keep_open = true;
+                }
+                "--review" => {
+                    options.review_id = Some(args.next().context("--review requires a review id")?)
+                }
                 "--data" => {
                     options.data = PathBuf::from(args.next().context("--data requires a path")?)
                 }
+                "--workspace" => {
+                    options.workspace = Some(
+                        PathBuf::from(args.next().context("--workspace requires a directory")?)
+                            .canonicalize()?,
+                    )
+                }
                 _ if arg.starts_with("-psn_") => {}
-                _ => bail!("Unknown argument: {arg}. Usage: semweft-desktop [--data preview.json]"),
+                _ => bail!(
+                    "Unknown argument: {arg}. Usage: semweft-desktop [--data preview.json] [--workspace directory]"
+                ),
             }
+        }
+        if !options.data.exists() && options.workspace.is_none() {
+            options.workspace = config["workspace"]
+                .as_str()
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir());
+        }
+        if bundled && !options.data.exists() && options.workspace.is_none() {
+            let example = storage.join("example-workspace");
+            if !example.is_dir() {
+                copy_example(&resources.join("example-workspace"), &example)?;
+            }
+            options.workspace = Some(example);
+            options.example = true;
+        }
+        if let Some(parent) = options.data.parent() {
+            fs::create_dir_all(parent)?;
         }
         Ok(options)
     }
+}
+
+fn copy_example(source: &std::path::Path, destination: &std::path::Path) -> Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_example(&entry.path(), &destination.join(entry.file_name()))?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), destination.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
 }
 
 struct Desktop {
@@ -149,7 +218,7 @@ struct Desktop {
     definition: source_view::DefinitionState,
     line_query: Entity<TextInput>,
     source_scroll: UniformListScrollHandle,
-    history: Vec<(String, usize)>,
+    history: Vec<SourceTab>,
     history_position: usize,
     session: Session,
     navigation: client::Navigation,
@@ -162,6 +231,31 @@ struct Desktop {
     graph_depth: usize,
     matrix_offset: usize,
     matrix_col_offset: usize,
+    client: client::Client,
+    refresh_cancel: client::Cancellation,
+    navigation_cancel: client::Cancellation,
+    graph_view: graph_view::GraphView,
+    source_side: String,
+    navigation_side: String,
+    analysis: analysis_view::AnalysisState,
+    workspaces: Vec<PathBuf>,
+    pane_drag: Option<(bool, f32, f32)>,
+    diff_view: diff_view::DiffView,
+    review_note: Entity<TextInput>,
+    source_note: Entity<TextInput>,
+    explorer: explorer::Explorer,
+    explore_from: Entity<TextInput>,
+    explore_to: Entity<TextInput>,
+}
+
+impl Drop for Desktop {
+    fn drop(&mut self) {
+        self.refresh_cancel.cancel();
+        self.navigation_cancel.cancel();
+        self.definition.cancellation.cancel();
+        self.analysis.cancellation.cancel();
+        self.explorer.cancellation.cancel();
+    }
 }
 
 fn muted(value: impl Into<SharedString>) -> Div {
@@ -172,7 +266,7 @@ fn heading(value: impl Into<SharedString>) -> Div {
 }
 impl Desktop {
     fn new(mut launch: Launch, data: Preview, cx: &mut Context<Self>) -> Self {
-        if !data.example {
+        if launch.workspace.is_none() && !data.example {
             launch.workspace = Some(data.workspace.clone());
         }
         let marks = LocalMarks::load(
@@ -196,8 +290,15 @@ impl Desktop {
                 .map(String::as_str)
                 .unwrap_or_default(),
         );
-        let session = Session::load(&launch.data, &data.workspace);
+        let mut session = Session::load(&launch.data, &data.workspace);
+        session
+            .tabs
+            .retain(|tab| data.sources_on(&tab.side).contains_key(&tab.file));
         let query = cx.new(|cx| TextInput::new("搜索文件、符号或源码…", cx));
+        let review_note = cx.new(|cx| TextInput::new("审阅备注（可选）", cx));
+        let source_note = cx.new(|cx| TextInput::new("为选中行添加批注…", cx));
+        let explore_from = cx.new(|cx| TextInput::new("符号、Trait、查询关键词或路径起点…", cx));
+        let explore_to = cx.new(|cx| TextInput::new("路径终点…", cx));
         let line_query =
             cx.new(|cx| TextInput::new("行号", cx).with_key_context("SemweftInput SemweftLine"));
         let subscription = cx.observe(&query, |this, query, cx| {
@@ -208,8 +309,26 @@ impl Desktop {
                 cx.notify();
             }
         });
-        let history = vec![(source_file.clone(), 1)];
-        Self {
+        let history = vec![SourceTab {
+            file: source_file.clone(),
+            line: 1,
+            side: "head".into(),
+        }];
+        let client = client::Client::new(&launch.repository, &data.workspace);
+        let restored = session
+            .active
+            .clone()
+            .filter(|tab| data.sources_on(&tab.side).contains_key(&tab.file));
+        let outline_visible = session.outline_visible.unwrap_or(true);
+        let mut workspaces: Vec<PathBuf> = fs::read(launch.data.with_file_name("workspaces.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        workspaces.retain(|path| path.is_dir());
+        if !workspaces.contains(&data.workspace) {
+            workspaces.push(data.workspace.clone());
+        }
+        let mut desktop = Self {
             launch,
             data,
             rows,
@@ -231,7 +350,7 @@ impl Desktop {
             file_tree,
             collapsed_folders,
             file_scroll: UniformListScrollHandle::new(),
-            outline_visible: true,
+            outline_visible,
             source_file,
             source_line: 1,
             source_lines,
@@ -252,7 +371,37 @@ impl Desktop {
             graph_depth: 2,
             matrix_offset: 0,
             matrix_col_offset: 0,
+            client,
+            refresh_cancel: client::Cancellation::default(),
+            navigation_cancel: client::Cancellation::default(),
+            graph_view: graph_view::GraphView::default(),
+            source_side: "head".into(),
+            navigation_side: "head".into(),
+            analysis: analysis_view::AnalysisState::default(),
+            workspaces,
+            pane_drag: None,
+            diff_view: diff_view::DiffView::default(),
+            source_note,
+            explorer: explorer::Explorer::default(),
+            explore_from,
+            explore_to,
+            review_note,
+        };
+        let saved_history = desktop.session.history.clone();
+        let saved_position = desktop.session.history_position;
+        if let Some(tab) = restored {
+            desktop.open_side(tab.file, tab.line, &tab.side, false, cx);
+        } else if !desktop.source_file.is_empty() {
+            desktop.open_location(desktop.source_file.clone(), 1, false, cx);
         }
+        if !saved_history.is_empty() {
+            desktop.history = saved_history
+                .into_iter()
+                .filter(|tab| desktop.data.sources_on(&tab.side).contains_key(&tab.file))
+                .collect();
+            desktop.history_position = saved_position.min(desktop.history.len().saturating_sub(1));
+        }
+        desktop
     }
 
     fn change_page(&mut self, page: Page, cx: &mut Context<Self>) {
@@ -267,25 +416,41 @@ impl Desktop {
             return;
         }
         self.busy = true;
+        self.explorer.reset();
+        self.navigation_cancel.cancel();
+        self.analysis.cancellation.cancel();
+        self.invalidate_definition();
+        self.refresh_cancel.cancel();
+        self.refresh_cancel = client::Cancellation::default();
+        let cancellation = self.refresh_cancel.clone();
         self.message = "正在捕获工作区与分析证据…".into();
         let options = self.launch.clone();
-        let requested = workspace.or(options.workspace.clone());
+        let requested = workspace.or_else(|| Some(self.data.workspace.clone()));
         let next_workspace = requested.clone();
+        let client = client::Client::new(&options.repository, requested.as_deref().unwrap());
+        let captured_client = client.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                gpui::Timer::after(std::time::Duration::from_millis(150)).await;
+                if !this
+                    .update(cx, |this, cx| {
+                        cx.notify();
+                        this.busy
+                    })
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let example = self.data.example && requested.as_ref() == Some(&self.data.workspace);
         let task = cx.background_executor().spawn(async move {
             let destination = options.data.with_extension("next.json");
-            let mut command = Command::new(&options.python);
-            command
-                .arg(&options.exporter)
-                .arg("--output")
-                .arg(&destination);
-            if let Some(path) = requested {
-                command.arg("--workspace").arg(path);
-            }
-            let output = command.output().context("无法运行本地数据导出器")?;
-            if !output.status.success() {
-                bail!("{}", String::from_utf8_lossy(&output.stderr));
-            }
-            let data = Preview::load(&destination)?;
+            let data = captured_client.capture(example, &cancellation)?;
+            cancellation.check()?;
+            fs::write(&destination, serde_json::to_vec(&data.raw)?)?;
+            cancellation.check()?;
             fs::rename(destination, &options.data)?;
             Ok::<_, anyhow::Error>(data)
         });
@@ -295,6 +460,7 @@ impl Desktop {
                 this.busy = false;
                 match result {
                     Ok(data) => {
+                        this.client = client;
                         this.launch.workspace = next_workspace;
                         this.rows = data.rows();
                         this.marks = LocalMarks::load(
@@ -308,6 +474,19 @@ impl Desktop {
                             this.collapsed_folders = this.file_tree.directories();
                         }
                         this.data = data;
+                        if !this.workspaces.contains(&this.data.workspace) {
+                            this.workspaces.push(this.data.workspace.clone());
+                        }
+                        if let Err(error) = fs::write(
+                            this.launch.data.with_file_name("workspaces.json"),
+                            serde_json::to_vec(&this.workspaces).unwrap_or_default(),
+                        ) {
+                            this.message = format!("工作区列表保存失败：{error}");
+                        }
+                        this.analysis.reset();
+                        let previous_side = this.source_side.clone();
+                        this.source_side.clear();
+                        this.source_lines.clear();
                         this.navigation_generation += 1;
                         this.navigation_busy = false;
                         this.navigation = client::Navigation::default();
@@ -315,25 +494,60 @@ impl Desktop {
                         this.navigation_error.clear();
                         this.matrix_offset = 0;
                         this.matrix_col_offset = 0;
-                        let file = if same_workspace
-                            && this.data.sources.contains_key(&this.source_file)
-                        {
-                            this.source_file.clone()
-                        } else {
-                            this.data.sources.keys().next().cloned().unwrap_or_default()
+                        this.session
+                            .tabs
+                            .retain(|tab| this.data.sources_on(&tab.side).contains_key(&tab.file));
+                        this.outline_visible = this.session.outline_visible.unwrap_or(true);
+                        let current = SourceTab {
+                            file: this.source_file.clone(),
+                            line: this.source_line,
+                            side: previous_side,
                         };
-                        let line = if same_workspace { this.source_line } else { 1 };
-                        this.history.clear();
-                        this.history_position = 0;
+                        let restored = if same_workspace
+                            && this
+                                .data
+                                .sources_on(&current.side)
+                                .contains_key(&current.file)
+                        {
+                            Some(current)
+                        } else {
+                            this.session.active.clone().filter(|tab| {
+                                this.data.sources_on(&tab.side).contains_key(&tab.file)
+                            })
+                        };
+                        let restored = restored.unwrap_or_else(|| SourceTab {
+                            file: this.data.sources.keys().next().cloned().unwrap_or_default(),
+                            line: 1,
+                            side: "head".into(),
+                        });
+                        this.history = this
+                            .session
+                            .history
+                            .iter()
+                            .filter(|tab| this.data.sources_on(&tab.side).contains_key(&tab.file))
+                            .cloned()
+                            .collect();
+                        this.history_position = this
+                            .session
+                            .history_position
+                            .min(this.history.len().saturating_sub(1));
                         this.source_lines.clear();
+                        this.source_file.clear();
+                        this.source_code = SourceDocument::default();
+                        this.diff_view = diff_view::DiffView::default();
                         this.invalidate_definition();
-                        this.open_location(file, line, true, cx);
+                        if restored.file.is_empty() {
+                            this.session.active = None;
+                            let _ = this.session.save(&this.launch.data);
+                        } else {
+                            this.open_side(restored.file, restored.line, &restored.side, true, cx);
+                        }
                         (this.search_hits, this.search_total) =
                             this.data.text_search(&this.search_text);
                         this.selected = 0;
                         this.message = "已捕获新的固定视图".into();
                     }
-                    Err(error) => this.message = format!("刷新失败，保留原视图：{error:#}"),
+                    Err(error) => this.message = format!("刷新未完成，保留原视图：{error:#}"),
                 }
                 cx.notify();
             });
@@ -643,7 +857,8 @@ impl Desktop {
     }
 
     fn symbol_details(&self, symbol: &Symbol, side: &str, cx: &Context<Self>) -> gpui::AnyElement {
-        let navigable = side == "head";
+        let side = side.to_owned();
+        let navigable = !self.data.symbols_on(&side).snapshot_id.is_empty();
         rsx! {
             <div class="p-4">
                 <div class="flex items-start gap-3 mb-4"><SymbolBadge kind={symbol.kind.clone()} /><div class="font-semibold min-w-0" text_size={px(15.)}>{symbol.qualified_name.clone()}</div></div>
@@ -654,20 +869,19 @@ impl Desktop {
                 <DetailField name={"作用域"} value={symbol.scope.clone()} />
                 <div base={muted(format!("ID {}…", symbol.symbol_id.chars().take(22).collect::<String>()))} text_size={px(10.)} />
                 <div class="flex gap-2 mt-4 flex-wrap">
-                    <ActionButton id="symbol-source" disabledIf={!navigable} onClick={cx.listener({ let symbol = symbol.clone(); move |this, _, _, cx| {
-                        if navigable && this.verify_symbol_location(&symbol, cx) {
-                            this.open_location(symbol.location.file.clone(), symbol.location.line, true, cx);
+                    <ActionButton id="symbol-source" disabledIf={!navigable} onClick={cx.listener({ let symbol = symbol.clone(); let side = side.clone(); move |this, _, _, cx| {
+                        if this.data.verify_location_on(&symbol.location, &side).is_ok() {
+                            this.open_side(symbol.location.file.clone(), symbol.location.line, &side, true, cx);
                             this.page = Page::Files;
                         }
                     }})}>{"打开源码"}</ActionButton>
-                    <ActionButton id="symbol-calls" active disabledIf={!navigable} onClick={cx.listener({ let symbol = symbol.clone(); move |this, _, _, cx| {
-                        if navigable && this.verify_symbol_location(&symbol, cx) { this.load_navigation(symbol.symbol_id.clone(), false, cx); }
+                    <ActionButton id="symbol-calls" active disabledIf={!navigable} onClick={cx.listener({ let symbol = symbol.clone(); let side = side.clone(); move |this, _, _, cx| {
+                        this.load_side_navigation(symbol.symbol_id.clone(), false, side.clone(), cx);
                     }})}>{"调用图"}</ActionButton>
-                    <ActionButton id="symbol-refs" disabledIf={!navigable} onClick={cx.listener({ let symbol = symbol.clone(); move |this, _, _, cx| {
-                        if navigable && this.verify_symbol_location(&symbol, cx) { this.load_navigation(symbol.symbol_id.clone(), true, cx); }
+                    <ActionButton id="symbol-refs" disabledIf={!navigable} onClick={cx.listener({ let symbol = symbol.clone(); let side = side.clone(); move |this, _, _, cx| {
+                        this.load_side_navigation(symbol.symbol_id.clone(), true, side.clone(), cx);
                     }})}>{"引用"}</ActionButton>
                 </div>
-                {...(!navigable).then(|| rsx! { <div base={muted("Base 源码见下方；完整源码、调用图和引用导航目前仅支持 Head。")} class="mt-3" /> })}
                 {self.code(&symbol.location.file, symbol.location.line, cx)}
             </div>
         }.into_any_element()
@@ -839,6 +1053,8 @@ impl Render for Desktop {
             Page::Graph => self.graph(cx),
             Page::Metrics => self.measurements(cx),
             Page::Bookmarks => self.bookmarks(cx),
+            Page::Analysis => self.analysis_panel(cx),
+            Page::Explorer => self.explorer_panel(cx),
         };
         rsx! {
             <div class="size-full flex flex-col bg-[#f3f5f8]" text_color={rgb(INK)} font_family=".SystemUIFont" text_size={px(13.)}
@@ -853,12 +1069,23 @@ impl Render for Desktop {
                 onAction={cx.listener(|this, _: &Forward, _, cx| this.travel(true, cx))}
                 onAction={cx.listener(|this, _: &ToggleBookmark, _, cx| this.toggle_bookmark(cx))}
                 onAction={cx.listener(|this, _: &FocusLine, window, cx| { this.page = Page::Files; this.line_query.focus_handle(cx).focus(window); this.line_query.update(cx, |input, cx| input.select_all_value(cx)); cx.notify(); })}
-                onAction={cx.listener(|this, _: &GoToLine, window, cx| this.go_to_line(window, cx))}>
+                onAction={cx.listener(|this, _: &GoToLine, window, cx| this.go_to_line(window, cx))}
+                onMouseMove={cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                    if let Some((outline, start, width)) = this.pane_drag {
+                        if !event.dragging() { this.pane_drag = None; return; }
+                        let delta = f32::from(event.position.x) - start;
+                        if outline { this.session.outline_width = Some((width - delta).clamp(140., 360.)); }
+                        else { this.session.file_panel_width = Some((width + delta).clamp(160., 400.)); }
+                        cx.notify();
+                    }
+                })}
+                onMouseUp={(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| { if this.pane_drag.take().is_some() { if let Err(error) = this.session.save(&this.launch.data) { this.message = error.to_string(); } cx.notify(); } }))}>
 
                 <div class="flex flex-1 min-h-0">
                     {self.sidebar(cx)}
                     <div class="flex flex-col flex-1 min-w-0">
                         {self.header(cx)}
+                        {self.workspace_tabs(cx)}
                         <div class="p-5 flex flex-col flex-1 min-h-0">{self.page_heading()}{content}</div>
                     </div>
                 </div>
@@ -914,8 +1141,38 @@ pub fn check_native_text(system: &gpui::TextSystem) -> Result<()> {
 
 pub fn run() -> Result<()> {
     let launch = Launch::discover()?;
-    let data = Preview::load(&launch.data)
-        .context("请先运行 python3 crates/semweft-desktop/scripts/preview.py 生成本地分析视图")?;
+    let mut data = if launch.data.is_file() {
+        Preview::load(&launch.data)?
+    } else {
+        let workspace = launch.workspace.clone().unwrap_or(std::env::current_dir()?);
+        Preview {
+            name: workspace
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            workspace,
+            example: launch.example,
+            ..Default::default()
+        }
+    };
+    let opened_review = if let Some(id) = &launch.review_id {
+        let workspace = launch.workspace.as_ref().unwrap_or(&data.workspace);
+        let client = client::Client::new(&launch.repository, workspace);
+        let (captured, review) = client.capture_review(id, &client::Cancellation::default())?;
+        data = captured;
+        Some(review)
+    } else {
+        None
+    };
+    let initial_workspace = if data.symbols.snapshot_id.is_empty() {
+        Some(data.workspace.clone())
+    } else {
+        launch
+            .workspace
+            .clone()
+            .filter(|workspace| workspace != &data.workspace)
+    };
     let check_navigation = if launch.check_ui {
         data.symbols
             .symbols
@@ -986,6 +1243,9 @@ pub fn run() -> Result<()> {
                 let check_ui = launch.check_ui;
                 let entity = cx.new(|cx| {
                     let mut view = Desktop::new(launch, data, cx);
+                    if let Some(review) = opened_review {
+                        view.install_review(review, cx);
+                    }
                     if let Some((symbol, navigation)) = check_navigation {
                         view.navigation_symbol = symbol;
                         view.navigation = navigation;
@@ -996,13 +1256,17 @@ pub fn run() -> Result<()> {
                             file: view.source_file.clone(),
                             line: 1,
                             label: "Native render check".into(),
+                            side: "head".into(),
                         });
                     }
                     view.focus.focus(window);
+                    if let Some(workspace) = initial_workspace {
+                        view.refresh(Some(workspace), cx);
+                    }
                     view
                 });
                 if check_ui {
-                    check_views(entity.clone(), 0, window);
+                    check_start(entity.clone(), 0, window);
                 }
                 entity
             },
@@ -1016,6 +1280,23 @@ pub fn run() -> Result<()> {
 mod source_view;
 mod workbench;
 
+fn check_start(view: Entity<Desktop>, retries: usize, window: &mut Window) {
+    window.on_next_frame(move |window, cx| {
+        if view.read(cx).busy {
+            assert!(retries < 7200, "Initial capture did not finish");
+            check_start(view, retries + 1, window);
+            return;
+        }
+        assert!(
+            !view.read(cx).data.symbols.snapshot_id.is_empty(),
+            "{}",
+            view.read(cx).message
+        );
+        check_views(view, 0, window);
+    });
+    window.refresh();
+}
+
 // Native rendering check: no screenshots, recording or accessibility automation.
 fn check_views(view: Entity<Desktop>, index: usize, window: &mut Window) {
     let pages = [
@@ -1028,6 +1309,8 @@ fn check_views(view: Entity<Desktop>, index: usize, window: &mut Window) {
         Page::Graph,
         Page::Review,
         Page::Overview,
+        Page::Analysis,
+        Page::Explorer,
     ];
     window.on_next_frame(move |window, cx| {
         if let Some(page) = pages.get(index) {
@@ -1124,13 +1407,48 @@ fn check_variants(view: Entity<Desktop>, index: usize, window: &mut Window) {
                         .position(|change| change.base_symbol.is_some())
                         .unwrap_or(0);
                 }
+                12..=18 => {
+                    this.page = Page::Graph;
+                    this.references = false;
+                    if index == 12 {
+                        this.navigation.relations = this.data.impact.relations.clone();
+                        this.navigation_symbol = this
+                            .navigation
+                            .relations
+                            .first()
+                            .map(|relation| relation.from.clone())
+                            .unwrap_or_default();
+                    }
+                    this.check_graph_variant(index - 12);
+                }
+                19 => {
+                    this.page = Page::Files;
+                    let file = this
+                        .data
+                        .sources
+                        .iter()
+                        .find(|(file, source)| {
+                            this.data
+                                .base_sources
+                                .get(*file)
+                                .is_some_and(|base| base != *source)
+                        })
+                        .map(|(file, _)| file.clone())
+                        .unwrap_or_else(|| this.data.sources.keys().next().cloned().unwrap());
+                    this.open_location(file, 1, true, cx);
+                    this.session.compare_sources = true;
+                    this.prepare_diff();
+                    assert!(!this.diff_view.diff.rows.is_empty());
+                    this.session.file_panel_width = Some(180.);
+                    this.session.outline_width = Some(160.);
+                }
                 _ => {
                     this.focus.focus(window);
                 }
             }
             cx.notify();
         });
-        if index < 12 {
+        if index < 20 {
             check_variants(view, index + 1, window);
         } else {
             check_shortcuts(view, 0, window);

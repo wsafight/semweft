@@ -12,6 +12,8 @@ anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 semweft-shared = { path = "../semweft-shared" }
+semweft-protocol = { path = "../semweft-protocol" }
+interprocess = "2.4.7"
 tree-sitter = "0.25"
 tree-sitter-highlight = "0.25"
 tree-sitter-rust = "0.24"
@@ -23,7 +25,7 @@ tree-sitter-javascript = "0.25"
 # macOS otherwise silently selects GPUI's NoopTextSystem, which paints no glyphs.
 gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "runtime_shaders"] }
 unicode-segmentation = "1.12"
-gpui-rsx = { version = "=0.10.2", features = ["tailwind-scale"] }
+gpui-rsx = { version = "=0.11.0", features = ["tailwind-scale"] }
 
 [profile.dev]
 debug = 0

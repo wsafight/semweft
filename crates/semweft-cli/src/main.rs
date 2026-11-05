@@ -1,6 +1,7 @@
 use semweft_query::{config, dependencies, engine, frontend, git, lsp, query, web, workspace};
 mod benchmark;
 mod daemon;
+mod desktop;
 mod hooks;
 mod mcp;
 mod prototype;
@@ -297,6 +298,8 @@ enum Command {
     Mcp,
     #[command(name = "__daemon", hide = true)]
     Daemon,
+    #[command(name = "__desktop", hide = true)]
+    Desktop,
     #[command(name = "__stop", hide = true)]
     Stop,
     /// Semantic-refresh consistency experiments in a temporary workspace copy.
@@ -408,6 +411,37 @@ enum GuardCommand {
 
 #[derive(Subcommand)]
 enum ReviewCommand {
+    Create {
+        #[arg(long, default_value = "WORKTREE")]
+        diff: String,
+        #[arg(long, default_value = "变更审查")]
+        title: String,
+        #[arg(long)]
+        open: bool,
+    },
+    Open {
+        review_id: String,
+    },
+    Decide {
+        review_id: String,
+        #[arg(long)]
+        revision: u64,
+        #[arg(long)]
+        item_id: Option<String>,
+        #[arg(long, value_parser = ["approve", "reject", "comment", "accept", "dismiss"])]
+        conclusion: String,
+        #[arg(long)]
+        reviewer: String,
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    Wait {
+        review_id: String,
+        #[arg(long, default_value_t = 0)]
+        after_revision: u64,
+        #[arg(long, default_value_t = 30000, value_parser = clap::value_parser!(u64).range(1..=60000))]
+        wait_ms: u64,
+    },
     Save {
         #[arg(long)]
         input: PathBuf,
@@ -568,6 +602,86 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             return Ok(Some(serde_json::to_value(artifact)?));
         }
         Command::Review {
+            command: ReviewCommand::Create { diff, title, open },
+        } => {
+            let report = daemon::call(
+                &resolved,
+                "agent_verify",
+                json!({"diff":git::diff_selectors(&resolved.root, diff)?,"limit":1000,"depth":5,"max_nodes":5000,"timeout_ms":cli.timeout_ms.unwrap_or(60000)}),
+            )?;
+            if report.get("error").is_some() {
+                return Ok(Some(report));
+            }
+            let report = reports::collect(&resolved, "agent_verify", report)?;
+            let request = daemon::call(
+                &resolved,
+                "__review_request",
+                json!({"action":"create","report":report,"title":title}),
+            )?;
+            if *open && let Some(id) = request["review_id"].as_str() {
+                desktop::open_review(&resolved, id)?;
+            }
+            return Ok(Some(request));
+        }
+        Command::Review {
+            command: ReviewCommand::Open { review_id },
+        } => {
+            let request = daemon::call(
+                &resolved,
+                "get_review_result",
+                json!({"review_id":review_id}),
+            )?;
+            if request.get("error").is_none() {
+                desktop::open_review(&resolved, review_id)?;
+            }
+            return Ok(Some(request));
+        }
+        Command::Review {
+            command:
+                ReviewCommand::Decide {
+                    review_id,
+                    revision,
+                    item_id,
+                    conclusion,
+                    reviewer,
+                    note,
+                },
+        } => {
+            return Ok(Some(daemon::call(
+                &resolved,
+                "__review_request",
+                json!({"action":"decide","review_id":review_id,"revision":revision,"item_id":item_id,"conclusion":conclusion,"reviewer":reviewer,"note":note}),
+            )?));
+        }
+        Command::Review {
+            command:
+                ReviewCommand::Wait {
+                    review_id,
+                    after_revision,
+                    wait_ms,
+                },
+        } => {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(*wait_ms);
+            loop {
+                let mut value = daemon::call(
+                    &resolved,
+                    "get_review_result",
+                    json!({"review_id":review_id,"timeout_ms":60000}),
+                )?;
+                let changed = value["review"]["revision"]
+                    .as_u64()
+                    .is_some_and(|revision| revision > *after_revision)
+                    || value["review"]["state"] == "superseded"
+                    || value.get("error").is_some();
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if changed || remaining.is_zero() {
+                    value["wait"] = json!({"changed":changed,"after_revision":after_revision});
+                    return Ok(Some(value));
+                }
+                tokio::time::sleep(remaining.min(std::time::Duration::from_millis(250))).await;
+            }
+        }
+        Command::Review {
             command:
                 ReviewCommand::Save {
                     input,
@@ -586,6 +700,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             daemon::serve(resolved)?;
             return Ok(None);
         }
+        Command::Desktop => return Ok(Some(desktop::bootstrap(&resolved)?)),
         Command::Snapshots { command } => {
             let args = match command {
                 SnapshotCommand::Compact => json!({"action":"compact"}),

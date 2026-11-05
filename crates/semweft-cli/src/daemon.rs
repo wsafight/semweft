@@ -152,7 +152,7 @@ fn name(resolved: &Resolved) -> Result<Name<'static>> {
     }
 }
 #[cfg(not(windows))]
-fn endpoint(resolved: &Resolved) -> PathBuf {
+pub(crate) fn endpoint(resolved: &Resolved) -> PathBuf {
     let path = resolved.cache.join("daemon.sock");
     if path.as_os_str().len() < 100 {
         return path;
@@ -587,6 +587,12 @@ fn handle(
                 Ok(json!({"schema_version":"0.1","updated":true}))
             }
             "__snapshots" => service.engine.snapshots(&request.args),
+            "__desktop_sources" => crate::desktop::sources(&service, &request.args),
+            "__desktop_context" => crate::desktop::context(resolved),
+            "__desktop_review" => crate::desktop::review(resolved, &request.args),
+            "__review_request" => {
+                crate::desktop::review_request(&service, resolved, &request.args, deadline)
+            }
             "__lease" => Ok(json!({"schema_version":"0.1","connected":true})),
             "__stop" => {
                 if leases.load(Ordering::SeqCst) > 0 {

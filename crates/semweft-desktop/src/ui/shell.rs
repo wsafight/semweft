@@ -12,11 +12,37 @@ impl Page {
             Self::Dependencies => ("layers", "模块依赖", "从依赖矩阵与循环关系理解架构"),
             Self::Metrics => ("chart", "度量与热点", "观察代码规模、活跃文件与长函数"),
             Self::Bookmarks => ("bookmark", "我的书签", "随时回到值得关注的代码位置"),
+            Self::Explorer => (
+                "search",
+                "深入分析",
+                "关系路径、实现、公开 API、风险、契约与服务依赖",
+            ),
+            Self::Analysis => (
+                "check",
+                "验证与测试",
+                "固定 Base/Head 的规则检查、测试建议和人工结论",
+            ),
         }
     }
 }
 
 impl Desktop {
+    pub(super) fn pane_resize(&self, outline: bool, cx: &Context<Self>) -> gpui::AnyElement {
+        rsx! { <div id={if outline { "outline-resize" } else { "file-resize" }} class="w-[4px] h-full flex-shrink-0 cursor-col-resize bg-[#edf1f5]" hoverClass="bg-[#92c1ac]"
+            onMouseDown={(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| { let width = if outline { this.session.outline_width.unwrap_or(204.) } else { this.session.file_panel_width.unwrap_or(244.) }; this.pane_drag = Some((outline, f32::from(event.position.x), width)); cx.stop_propagation(); }))} /> }.into_any_element()
+    }
+
+    pub(super) fn workspace_tabs(&self, cx: &Context<Self>) -> gpui::AnyElement {
+        rsx! { <div id="workspace-tabs" class="flex h-[30px] flex-shrink-0 overflow-x-scroll bg-[#eaf0f5] border-b" border_color={rgb(LINE)}>
+            {for (index, workspace) in self.workspaces.iter().enumerate() {
+                <div id={("workspace-tab", index)} class="px-3 flex items-center flex-shrink-0 cursor-pointer border-r gap-2" border_color={rgb(LINE)} whenClass={(workspace == &self.data.workspace, "bg-white text-[#267b62]")} text_size={px(10.)}
+                    onClick={cx.listener(move |this, _, _, cx| { let workspace = this.workspaces[index].clone(); if workspace != this.data.workspace { this.refresh(Some(workspace), cx); } })}>
+                    <Icon name="folder" size={11u32} /><div>{workspace.file_name().unwrap_or_default().to_string_lossy().into_owned()}</div>
+                </div>
+            }}
+        </div> }.into_any_element()
+    }
+
     pub(super) fn sidebar(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let groups = [
             (
@@ -28,6 +54,8 @@ impl Desktop {
                 vec![
                     Page::Overview,
                     Page::Review,
+                    Page::Analysis,
+                    Page::Explorer,
                     Page::Dependencies,
                     Page::Metrics,
                 ],
@@ -97,6 +125,7 @@ impl Desktop {
                     </div>
                     <div class="w-[1px] h-[20px]" bg={rgb(LINE)} />
                     <IconButton id="refresh" icon="refresh" hint="刷新项目  ⌘R" disabledIf={self.busy} onClick={cx.listener(|this, _, _, cx| this.refresh(None, cx))} />
+                    {...self.busy.then(|| rsx! { <ActionButton id="cancel-refresh" onClick={cx.listener(|this, _, _, cx| { this.refresh_cancel.cancel(); this.message = "正在取消捕获…".into(); cx.notify(); })}>{"取消"}</ActionButton> })}
                     <ActionButton id="export" onClick={cx.listener(|this, _, _, cx| this.export(cx))}><Icon name="upload" color={0x627087u32} size={14u32} />{"导出报告"}</ActionButton>
                 </div>
             </div>
@@ -134,7 +163,7 @@ impl Desktop {
         rsx! {
             <div class="h-[26px] px-4 flex-shrink-0 flex items-center gap-4 border-t bg-white" border_color={rgb(LINE)} text_size={px(10.)} text_color={rgb(MUTED)}>
                 <div class="flex items-center gap-2 flex-shrink-0"><Icon name="check" size={11u32} color={GREEN} />{if self.busy { "更新中" } else { "本地引擎就绪" }}</div>
-                <div class="truncate flex-1 min-w-0">{if self.message.is_empty() { format!("{} 个文件 · {} 个符号{}", self.data.sources.len(), self.data.symbols.symbols.len(), if truncated { " · 部分结果已截断" } else { "" }) } else { self.message.clone() }}</div>
+                <div class="truncate flex-1 min-w-0">{if self.busy { self.refresh_cancel.progress() } else if self.message.is_empty() { format!("{} 个文件 · {} 个符号{}", self.data.sources.len(), self.data.symbols.symbols.len(), if truncated { " · 部分结果已截断" } else { "" }) } else { self.message.clone() }}</div>
                 <div class="flex-shrink-0">{if matches!(self.page, Page::Files | Page::Search) { format!("{}    Ln {}    UTF-8", self.source_code.language, self.source_line) } else { "固定快照 · 刷新以更新".into() }}</div>
             </div>
         }.into_any_element()

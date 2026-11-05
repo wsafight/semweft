@@ -1,7 +1,10 @@
 use crate::sync::MutexExt;
 use crate::{
     engine::{Engine, StoredView},
-    git, suggestions, verify,
+    git,
+    graph_page::GraphRelations,
+    report_page::ReportList,
+    suggestions, verify,
 };
 use anyhow::{Context, Result, bail};
 use semweft_core::*;
@@ -9,7 +12,8 @@ use semweft_store::Direction;
 use serde_json::{Value, json};
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    rc::Rc,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -136,10 +140,10 @@ pub fn capabilities() -> Value {
         "architecture":{"rule":"architecture_layer_direction","version":crate::architecture::RULE_VERSION,"scope":"indexed file-level dependencies","baseline":true},
         "agent_guards":{"tools":["agent_preflight","agent_verify"],"protection":"captured base/head policies; whole-file conservative symbol scope","compiler_and_tests_executed":false},
         "hooks":{"hosts":["claude","codex"],"events":["PreToolUse","PostToolUse"],"tool_input_scope":"explicit file edits and apply_patch headers; not shell writes","host_end_to_end_validated":false},
-        "reviews":{"storage":"local immutable content-bound records","approval_invalidated_by":["snapshot","semantic_epoch","rule_versions"],"signed":false},
+        "reviews":{"storage":"local immutable content-bound records and revision-checked decision events","requests":true,"finding_decisions":true,"source_annotations":true,"wait":"CLI polling with bounded timeout","approval_invalidated_by":["snapshot","semantic_epoch","rule_versions","later_decision"],"signed":false},
         "contracts":{"status":"experimental","formats":["protobuf"],"parser":"protox-parse@0.10.0","mapping":"explicit configuration; candidate only","rules":crate::contracts::rules(),"unmodeled":["thrift","openapi","enum compatibility","descriptor linking","runtime consumers"]},
         "ci_reports":{"formats":["json","markdown","sarif_2.1.0","html"],"sarif_scope":"verification findings","all_pages_commands":["verify","tests","impact","arch-check","guard","contract-impact","map","search","calls","path","refs","impls"],"offline_render":"report --input","executes_tests":false},
-        "unsupported":["HTTP MCP","Thrift","OpenAPI"],"commands":["benchmark-storage","snapshots pin","snapshots unpin","snapshots gc","snapshots usage","snapshots compact","init","trust","index","doctor","capabilities","status","map","search","symbol-at","symbol","refs","impls","calls","impact","verify","path","tests","risk-inputs","arch-check","guard before","guard after","hook","review save","review get","contract-impact","report","context","mcp","prototype scan","prototype check"]})
+        "unsupported":["HTTP MCP","Thrift","OpenAPI"],"commands":["benchmark-storage","snapshots pin","snapshots unpin","snapshots gc","snapshots usage","snapshots compact","init","trust","index","doctor","capabilities","status","map","search","symbol-at","symbol","refs","impls","calls","impact","verify","path","tests","risk-inputs","arch-check","guard before","guard after","hook","review create","review open","review decide","review wait","review save","review get","contract-impact","report","context","mcp","prototype scan","prototype check"]})
 }
 
 fn go_capabilities() -> Value {
@@ -178,7 +182,34 @@ struct PageData {
     metadata: Value,
     fields: Vec<String>,
     lists: BTreeMap<String, Vec<Value>>,
+    reports: BTreeMap<String, ReportList>,
+    graph: Option<GraphRelations>,
     bytes: usize,
+}
+impl PageData {
+    fn len(&self, field: &str) -> usize {
+        if field == "relations"
+            && let Some(graph) = &self.graph
+        {
+            return graph.len();
+        }
+        self.reports.get(field).map_or_else(
+            || self.lists.get(field).map_or(0, Vec::len),
+            ReportList::len,
+        )
+    }
+
+    fn values(&self, field: &str, range: std::ops::Range<usize>) -> Result<Vec<Value>> {
+        if field == "relations"
+            && let Some(graph) = &self.graph
+        {
+            return graph.values(range);
+        }
+        if let Some(report) = self.reports.get(field) {
+            return report.values(range);
+        }
+        Ok(self.lists.get(field).map(Vec::as_slice).unwrap_or(&[])[range].to_vec())
+    }
 }
 #[derive(Clone)]
 struct Page {
@@ -194,16 +225,19 @@ impl std::ops::Deref for Page {
     }
 }
 impl Page {
-    fn new(
+    fn new(tool: String, args: Value, result: Value, fields: Vec<String>, offset: usize) -> Self {
+        Self::build(tool, args, result, fields, offset, false).unwrap()
+    }
+
+    fn build(
         tool: String,
         args: Value,
         mut result: Value,
         fields: Vec<String>,
         offset: usize,
-    ) -> Self {
-        let bytes =
-            semweft_store::payload_bytes(&(&tool, &args, &result, &fields)).saturating_mul(3);
-        let lists = fields
+        compact: bool,
+    ) -> Result<Self> {
+        let mut lists: BTreeMap<_, _> = fields
             .iter()
             .map(|field| {
                 let pointer = format!("/{}", field.replace('.', "/"));
@@ -221,19 +255,44 @@ impl Page {
                 (field.clone(), values)
             })
             .collect();
-        Self {
+        let mut reports = BTreeMap::new();
+        if compact
+            && lists.values().map(Vec::len).sum::<usize>()
+                > args["limit"].as_u64().unwrap_or(100) as usize
+        {
+            for (field, values) in &mut lists {
+                if !values.is_empty() {
+                    reports.insert(field.clone(), ReportList::new(std::mem::take(values))?);
+                }
+            }
+        }
+        let bytes = semweft_store::payload_bytes(&(&tool, &args, &result, &fields, &lists))
+            .saturating_mul(3)
+            .saturating_add(reports.values().map(ReportList::estimated_bytes).sum());
+        Ok(Self {
             data: Arc::new(PageData {
                 tool,
                 args,
                 metadata: result,
                 fields,
                 lists,
+                reports,
+                graph: None,
                 bytes,
             }),
             offset,
             created: Instant::now(),
             saved: Instant::now(),
+        })
+    }
+
+    fn with_graph(mut self, graph: Option<GraphRelations>) -> Self {
+        if let Some(graph) = graph {
+            let data = Arc::get_mut(&mut self.data).unwrap();
+            data.bytes = data.bytes.saturating_add(graph.estimated_bytes());
+            data.graph = Some(graph);
         }
+        self
     }
 }
 #[derive(Default)]
@@ -362,6 +421,7 @@ impl QueryService {
         if let Some(cursor) = args["cursor"].as_str() {
             return self.continue_page(tool, &args, cursor);
         }
+        let mut graph_relations = None;
         let mut result = if matches!(
             tool,
             "impact_of"
@@ -403,10 +463,30 @@ impl QueryService {
             } else {
                 tool
             };
-            self.compute(compute_tool, &args, &stored, fresh, deadline)?
+            if matches!(tool, "call_graph" | "impact_of" | "suggest_tests") {
+                let (result, graph) = graph_result(
+                    envelope(&stored, fresh),
+                    &stored,
+                    &args,
+                    compute_tool,
+                    deadline,
+                )?;
+                let mut result = result;
+                if tool == "suggest_tests" {
+                    result = suggestions::report(self, result, &args, deadline, Some(&graph))?;
+                }
+                if graph.edges.len() <= args["limit"].as_u64().unwrap_or(100) as usize {
+                    result["relations"] = json!(graph_values(&graph.edges, &stored));
+                } else {
+                    graph_relations = Some(GraphRelations::new(graph.edges, &stored)?);
+                }
+                result
+            } else {
+                self.compute(compute_tool, &args, &stored, fresh, deadline)?
+            }
         };
-        if tool == "suggest_tests" {
-            result = suggestions::report(self, result, &args, deadline)?;
+        if tool == "suggest_tests" && args.get("diff").is_some() {
+            result = suggestions::report(self, result, &args, deadline, None)?;
         }
         if tool == "agent_verify" {
             result = crate::guard::after(self, result, &args, deadline)?;
@@ -530,13 +610,17 @@ impl QueryService {
         if matches!(tool, "search_symbols" | "repo_map") && Instant::now() >= deadline {
             mark_timeout(&mut result, &args);
         }
-        let mut response = self.page(Page::new(
-            tool.into(),
-            args.clone(),
-            result,
-            fields.into_iter().map(str::to_owned).collect(),
-            0,
-        ))?;
+        let mut response = self.page(
+            Page::build(
+                tool.into(),
+                args.clone(),
+                result,
+                fields.into_iter().map(str::to_owned).collect(),
+                0,
+                args.get("diff").is_some() || tool == "suggest_tests",
+            )?
+            .with_graph(graph_relations),
+        )?;
         if matches!(tool, "search_symbols" | "repo_map") && Instant::now() >= deadline {
             mark_timeout(&mut response, &args);
         }
@@ -576,22 +660,19 @@ impl QueryService {
         self.page(page)
     }
     fn page(&self, mut page: Page) -> Result<Value> {
+        let _timing = crate::timing::Timing::new("page");
         let limit = page.args["limit"].as_u64().unwrap_or(100) as usize;
-        let total: usize = page
-            .fields
-            .iter()
-            .map(|key| page.lists.get(key).map(Vec::as_slice).unwrap_or(&[]).len())
-            .sum();
+        let total: usize = page.fields.iter().map(|key| page.len(key)).sum();
         let start = page.offset;
         let mut end = (start + limit).min(total);
         let mut response = page.metadata.clone();
         let mut position = 0;
         for key in &page.fields {
-            let values = page.lists.get(key).map(Vec::as_slice).unwrap_or(&[]);
-            let a = start.saturating_sub(position).min(values.len());
-            let b = end.saturating_sub(position).min(values.len());
-            set_list(&mut response, key, values[a..b].to_vec());
-            position += values.len();
+            let length = page.len(key);
+            let begin = start.saturating_sub(position).min(length);
+            let finish = end.saturating_sub(position).min(length);
+            set_list(&mut response, key, page.values(key, begin..finish)?);
+            position += length;
         }
         if page.tool == "context_pack" {
             let budget = page.args["budget"].as_u64().unwrap();
@@ -606,7 +687,7 @@ impl QueryService {
         let mut relation_position = 0;
         let mut remaining_relations = 0;
         for key in &page.fields {
-            let length = page.lists.get(key).map(Vec::as_slice).unwrap_or(&[]).len();
+            let length = page.len(key);
             if matches!(
                 key.as_str(),
                 "relations"
@@ -907,66 +988,9 @@ impl QueryService {
                 }
             }
             "call_graph" | "impact_of" => {
-                let target = resolve(stored, args["symbol"].as_str().unwrap())?;
-                let graph = traverse(
-                    stored,
-                    &target.symbol_id,
-                    args,
-                    tool == "impact_of",
-                    deadline,
-                );
-                result["target"] = symbol_value(target, stored, false, true);
-                result["relations"] = json!(
-                    graph
-                        .edges
-                        .iter()
-                        .map(|(r, depth, path)| {
-                            let mut v = relation_value(r, stored);
-                            v["depth"] = json!(depth);
-                            v["path"] = json!(path);
-                            v
-                        })
-                        .collect::<Vec<_>>()
-                );
-                result["nodes"] = json!(
-                    graph
-                        .nodes
-                        .iter()
-                        .filter_map(|id| stored.index().symbol(id))
-                        .map(|s| symbol_value(s, stored, false, false))
-                        .collect::<Vec<_>>()
-                );
-                result["frontier"] = json!(graph.frontier);
-                result["evidence_summary"] = summary(
-                    &graph
-                        .edges
-                        .iter()
-                        .map(|(r, _, _)| r.clone())
-                        .collect::<Vec<_>>(),
-                    graph.basis,
-                );
-                if let Some(reason) = graph.reason {
-                    result["output"] = json!({"truncated":true,"truncation_reason":reason,"remaining_relations":if graph.basis=="partial" {Value::Null} else {json!(0)},"continuation":{"kind":"requery","frontier":graph.frontier,"suggested":{"depth":(args["depth"].as_u64().unwrap_or(3)+1).min(10),"max_nodes":(args["max_nodes"].as_u64().unwrap_or(1000)*2).min(100000)}}});
-                }
-                if tool == "impact_of" {
-                    let callers: BTreeSet<_> = graph
-                        .edges
-                        .iter()
-                        .filter(|(r, _, _)| r.kind == "call")
-                        .map(|(r, _, _)| r.from_symbol.clone())
-                        .filter(|id| id != &target.symbol_id)
-                        .collect();
-                    let direct: BTreeSet<_> = graph
-                        .edges
-                        .iter()
-                        .filter(|(r, d, _)| {
-                            *d == 1 && r.kind == "call" && r.from_symbol != target.symbol_id
-                        })
-                        .map(|(r, _, _)| r.from_symbol.clone())
-                        .collect();
-                    result["summary"] = json!({"direct_callers":direct.len(),"transitive_callers":callers.len(),"services":null,"tests_to_run":null,"risk":null});
-                    result["changes"] = json!([]);
-                }
+                let (metadata, graph) = graph_result(result, stored, args, tool, deadline)?;
+                result = metadata;
+                result["relations"] = json!(graph_values(&graph.edges, stored));
             }
             "find_paths" => return find_paths(result, stored, args, deadline),
             "context_pack" => return context_pack(result, stored, args, deadline),
@@ -974,6 +998,75 @@ impl QueryService {
         }
         Ok(result)
     }
+}
+
+fn graph_values(edges: &[(Relation, u64, Vec<String>)], stored: &StoredView) -> Vec<Value> {
+    edges.iter().map(|edge| graph_value(edge, stored)).collect()
+}
+
+pub(crate) fn graph_value(
+    (relation, depth, path): &(Relation, u64, Vec<String>),
+    stored: &StoredView,
+) -> Value {
+    let mut value = relation_value(relation, stored);
+    value["depth"] = json!(depth);
+    value["path"] = json!(path);
+    value
+}
+
+fn graph_result(
+    mut result: Value,
+    stored: &StoredView,
+    args: &Value,
+    tool: &str,
+    deadline: Instant,
+) -> Result<(Value, Graph)> {
+    let target = resolve(stored, args["symbol"].as_str().unwrap())?;
+    let graph = traverse(
+        stored,
+        &target.symbol_id,
+        args,
+        tool == "impact_of",
+        deadline,
+    );
+    result["target"] = symbol_value(target, stored, false, true);
+    result["nodes"] = json!(
+        graph
+            .nodes
+            .iter()
+            .filter_map(|id| stored.index().symbol(id))
+            .map(|symbol| symbol_value(symbol, stored, false, false))
+            .collect::<Vec<_>>()
+    );
+    result["frontier"] = json!(graph.frontier);
+    result["evidence_summary"] = summary_refs(
+        graph.edges.iter().map(|(relation, _, _)| relation),
+        graph.basis,
+    );
+    if let Some(reason) = graph.reason {
+        result["output"] = json!({"truncated":true,"truncation_reason":reason,"remaining_relations":if graph.basis=="partial" {Value::Null} else {json!(0)},"continuation":{"kind":"requery","frontier":graph.frontier,"suggested":{"depth":(args["depth"].as_u64().unwrap_or(3)+1).min(10),"max_nodes":(args["max_nodes"].as_u64().unwrap_or(1000)*2).min(100000)}}});
+    }
+    if tool == "impact_of" {
+        let callers: BTreeSet<_> = graph
+            .edges
+            .iter()
+            .filter(|(relation, _, _)| {
+                relation.kind == "call" && relation.from_symbol != target.symbol_id
+            })
+            .map(|(relation, _, _)| &relation.from_symbol)
+            .collect();
+        let direct: BTreeSet<_> = graph
+            .edges
+            .iter()
+            .filter(|(relation, depth, _)| {
+                *depth == 1 && relation.kind == "call" && relation.from_symbol != target.symbol_id
+            })
+            .map(|(relation, _, _)| &relation.from_symbol)
+            .collect();
+        result["summary"] = json!({"direct_callers":direct.len(),"transitive_callers":callers.len(),"services":null,"tests_to_run":null,"risk":null});
+        result["changes"] = json!([]);
+    }
+    Ok((result, graph))
 }
 
 fn list_at<'a>(value: &'a Value, path: &str) -> &'a [Value] {
@@ -1157,7 +1250,34 @@ pub fn test_scope(symbol: &Symbol, stored: &StoredView) -> &'static str {
 pub fn relation_value(relation: &Relation, stored: &StoredView) -> Value {
     let from = stored.index().symbol(&relation.from_symbol);
     let to = stored.index().symbol(&relation.to_symbol);
-    json!({"relation_id":relation.relation_id,"kind":relation.kind,"from":relation.from_symbol,"to":relation.to_symbol,"from_name":from.map(public_name).unwrap_or_else(||relation.from_symbol.clone()),"to_name":to.map(public_name),"location":{"file":relation.file,"line":relation.span.start.line,"column":relation.span.start.column,"file_hash":relation.origin.as_ref().map(|o|&o.file_hash).or_else(||stored.view.snapshot.manifest.files.get(&relation.file).map(|f|&f.file_hash)),"coordinate_snapshot_id":relation.origin.as_ref().map(|o|&o.snapshot_id).unwrap_or(&stored.view.snapshot.snapshot_id)},"span":relation.span,"certainty":relation.certainty,"freshness":relation.freshness,"runtime":relation.runtime,"evidence":relation.evidence,"origin":relation.origin,"scope":from.map(|s|test_scope(s,stored)).unwrap_or("production")})
+    relation_value_with_context(
+        relation,
+        &from
+            .map(public_name)
+            .unwrap_or_else(|| relation.from_symbol.clone()),
+        to.map(public_name).as_deref(),
+        from.map(|symbol| test_scope(symbol, stored))
+            .unwrap_or("production"),
+        stored
+            .view
+            .snapshot
+            .manifest
+            .files
+            .get(&relation.file)
+            .map(|file| file.file_hash.as_str()),
+        &stored.view.snapshot.snapshot_id,
+    )
+}
+
+pub(crate) fn relation_value_with_context(
+    relation: &Relation,
+    from_name: &str,
+    to_name: Option<&str>,
+    scope: &str,
+    file_hash: Option<&str>,
+    snapshot_id: &str,
+) -> Value {
+    json!({"relation_id":relation.relation_id,"kind":relation.kind,"from":relation.from_symbol,"to":relation.to_symbol,"from_name":from_name,"to_name":to_name,"location":{"file":relation.file,"line":relation.span.start.line,"column":relation.span.start.column,"file_hash":relation.origin.as_ref().map(|origin|origin.file_hash.as_str()).or(file_hash),"coordinate_snapshot_id":relation.origin.as_ref().map(|origin|origin.snapshot_id.as_str()).unwrap_or(snapshot_id)},"span":relation.span,"certainty":relation.certainty,"freshness":relation.freshness,"runtime":relation.runtime,"evidence":relation.evidence,"origin":relation.origin,"scope":scope})
 }
 pub fn filtered(relations: Vec<Relation>, args: &Value) -> Vec<Relation> {
     relations
@@ -1166,7 +1286,7 @@ pub fn filtered(relations: Vec<Relation>, args: &Value) -> Vec<Relation> {
         .collect()
 }
 fn filter_relation(mut r: Relation, args: &Value) -> Option<Relation> {
-    if !prefix(&r.file, args) {
+    if !relation_matches(&r, args) {
         return None;
     }
     if let Some(sources) = args["source"].as_array() {
@@ -1188,24 +1308,64 @@ fn filter_relation(mut r: Relation, args: &Value) -> Option<Relation> {
             Certainty::Candidate
         };
     }
-    if args["certainty"]
-        .as_array()
-        .is_some_and(|c| !c.contains(&serde_json::to_value(&r.certainty).unwrap()))
-        || args["freshness"]
-            .as_array()
-            .is_some_and(|c| !c.contains(&json!(r.freshness)))
-    {
-        return None;
-    }
     Some(r)
 }
 
+fn relation_matches(relation: &Relation, args: &Value) -> bool {
+    if !prefix(&relation.file, args) {
+        return false;
+    }
+    let mut definite = relation.certainty == Certainty::Definite;
+    let mut freshness = relation.freshness.as_str();
+    if let Some(sources) = args["source"].as_array() {
+        let evidence = relation.evidence.iter().filter(|evidence| {
+            sources
+                .iter()
+                .any(|source| source.as_str() == Some(evidence.source.as_str()))
+        });
+        let mut count = 0;
+        let mut only_syntax = true;
+        definite = false;
+        for evidence in evidence {
+            count += 1;
+            only_syntax &= evidence.source == "L1";
+            definite |= evidence.certainty == Certainty::Definite;
+        }
+        if count == 0 {
+            return false;
+        }
+        if relation.origin.is_some() && only_syntax {
+            freshness = "current";
+        } else if relation.origin.is_some() {
+            definite = false;
+        }
+    }
+    let certainty = if definite { "definite" } else { "candidate" };
+    !args["certainty"]
+        .as_array()
+        .is_some_and(|values| !values.iter().any(|value| value.as_str() == Some(certainty)))
+        && !args["freshness"]
+            .as_array()
+            .is_some_and(|values| !values.iter().any(|value| value.as_str() == Some(freshness)))
+}
+
 pub fn summary(relations: &[Relation], basis: &str) -> Value {
+    summary_refs(relations.iter(), basis)
+}
+
+pub(crate) fn summary_refs<'a>(
+    relations: impl Iterator<Item = &'a Relation>,
+    basis: &str,
+) -> Value {
+    let mut relation_count = 0usize;
+    let mut evidence_count = 0usize;
     let mut source = BTreeMap::from([("L1", 0), ("L2", 0), ("L3", 0)]);
     let mut certainty = BTreeMap::from([("definite", 0), ("candidate", 0)]);
     let mut freshness = BTreeMap::from([("current", 0), ("pending", 0), ("stale", 0)]);
     let mut runtime = BTreeMap::from([("observed", 0), ("not_observed", 0), ("unavailable", 0)]);
     for r in relations {
+        relation_count += 1;
+        evidence_count += r.evidence.len();
         for e in &r.evidence {
             *source.entry(e.source.as_str()).or_default() += 1;
         }
@@ -1219,7 +1379,7 @@ pub fn summary(relations: &[Relation], basis: &str) -> Value {
         *freshness.entry(&r.freshness).or_default() += 1;
         *runtime.entry(&r.runtime).or_default() += 1;
     }
-    json!({"basis":basis,"exact":basis!="partial","relation_count":relations.len(),"evidence_count":relations.iter().map(|r|r.evidence.len()).sum::<usize>(),"source":source,"certainty":certainty,"freshness":freshness,"runtime":runtime})
+    json!({"basis":basis,"exact":basis!="partial","relation_count":relation_count,"evidence_count":evidence_count,"source":source,"certainty":certainty,"freshness":freshness,"runtime":runtime})
 }
 /// Collapse many gaps of one kind (and side) into a single counted record with a
 /// few samples, so a response does not repeat thousands of per-file diagnostics.
@@ -1409,7 +1569,8 @@ pub fn truncation_reason<'a>(previous: Option<&'a str>, next: Option<&'a str>) -
 struct RelationGraph<'a> {
     index: &'a crate::query_index::QueryIndex,
     direction: Direction,
-    seen: std::cell::RefCell<BTreeMap<String, Relation>>,
+    seen: std::cell::RefCell<HashMap<Rc<str>, Relation>>,
+    symbols: std::cell::RefCell<HashSet<Rc<str>>>,
 }
 impl<'a> RelationGraph<'a> {
     fn new(index: &'a crate::query_index::QueryIndex, direction: Direction) -> Self {
@@ -1417,32 +1578,46 @@ impl<'a> RelationGraph<'a> {
             index,
             direction,
             seen: Default::default(),
+            symbols: Default::default(),
         }
     }
 
     /// A relation produced by an earlier `neighbors` call.
-    fn relation(&self, id: &str) -> Relation {
-        self.seen.borrow()[id].clone()
+    fn relation(&self, id: &str) -> std::cell::Ref<'_, Relation> {
+        std::cell::Ref::map(self.seen.borrow(), |seen| seen.get(id).unwrap())
     }
 }
 impl semweft_algo::graph::GraphView for RelationGraph<'_> {
-    type Node = String;
-    type Edge = String;
+    type Node = Rc<str>;
+    type Edge = Rc<str>;
 
-    fn neighbors(&self, node: &String) -> impl Iterator<Item = (String, String)> {
+    fn neighbors(&self, node: &Rc<str>) -> impl Iterator<Item = (Rc<str>, Rc<str>)> {
         let direction = self.direction;
         let edges = self.index.adjacent(node, direction);
         let mut seen = self.seen.borrow_mut();
+        let mut symbols = self.symbols.borrow_mut();
         let mut out = Vec::with_capacity(edges.len());
         for r in edges {
             let next = match direction {
-                Direction::Incoming => r.from_symbol.clone(),
-                Direction::Outgoing => r.to_symbol.clone(),
-                Direction::Both if r.to_symbol == *node => r.from_symbol.clone(),
-                Direction::Both => r.to_symbol.clone(),
+                Direction::Incoming => r.from_symbol.as_str(),
+                Direction::Outgoing => r.to_symbol.as_str(),
+                Direction::Both if r.to_symbol == node.as_ref() => r.from_symbol.as_str(),
+                Direction::Both => r.to_symbol.as_str(),
             };
-            out.push((r.relation_id.clone(), next));
-            seen.insert(r.relation_id.clone(), r);
+            let next = symbols.get(next).cloned().unwrap_or_else(|| {
+                let value: Rc<str> = next.into();
+                symbols.insert(value.clone());
+                value
+            });
+            let edge = seen
+                .get_key_value(r.relation_id.as_str())
+                .map(|(id, _)| id.clone())
+                .unwrap_or_else(|| {
+                    let id: Rc<str> = r.relation_id.as_str().into();
+                    seen.insert(id.clone(), r);
+                    id
+                });
+            out.push((edge, next));
         }
         out.into_iter()
     }
@@ -1455,6 +1630,7 @@ pub fn traverse(
     impact: bool,
     deadline: Instant,
 ) -> Graph {
+    let _timing = crate::timing::Timing::new("traverse");
     use semweft_algo::graph::{Interrupt, Limits, StopReason, breadth_first_filtered};
     let direction = match args["direction"].as_str().unwrap_or("callers") {
         "callees" => Direction::Outgoing,
@@ -1464,7 +1640,7 @@ pub fn traverse(
     let graph = RelationGraph::new(stored.index(), direction);
     let traversal = breadth_first_filtered(
         &graph,
-        target.to_string(),
+        Rc::from(target),
         Limits {
             max_depth: args["depth"].as_u64().unwrap_or(3),
             max_nodes: args["max_nodes"].as_u64().unwrap_or(1000) as usize,
@@ -1480,7 +1656,7 @@ pub fn traverse(
         },
         |id| {
             let relation = graph.relation(id);
-            (impact || relation.kind == "call") && filter_relation(relation, args).is_some()
+            (impact || relation.kind == "call") && relation_matches(&relation, args)
         },
     );
     let reason = traversal.reason.map(|reason| match reason {
@@ -1494,6 +1670,7 @@ pub fn traverse(
         Some(_) => "partial",
         None => "complete",
     };
+    let mut relations = graph.seen.into_inner();
     let edges = traversal
         .edges
         .into_iter()
@@ -1503,16 +1680,24 @@ pub fn traverse(
                 path.reverse();
             }
             (
-                filter_relation(graph.relation(&id), args).unwrap(),
+                filter_relation(relations.remove(id.as_ref()).unwrap(), args).unwrap(),
                 visit.depth,
-                path,
+                path.into_iter().map(|id| id.to_string()).collect(),
             )
         })
         .collect();
     Graph {
         edges,
-        nodes: traversal.nodes,
-        frontier: traversal.frontier.into_iter().collect(),
+        nodes: traversal
+            .nodes
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect(),
+        frontier: traversal
+            .frontier
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect(),
         basis,
         reason,
     }
@@ -1545,8 +1730,8 @@ fn find_paths(
     };
     let traversal = simple_paths_filtered(
         &graph,
-        from.symbol_id.clone(),
-        to.symbol_id.clone(),
+        Rc::from(from.symbol_id.as_str()),
+        Rc::from(to.symbol_id.as_str()),
         limits,
         || {
             if check_cancelled().is_err() {
@@ -1559,7 +1744,7 @@ fn find_paths(
         },
         |id| {
             let relation = graph.relation(id);
-            relation.kind == "call" && filter_relation(relation, args).is_some()
+            relation.kind == "call" && relation_matches(&relation, args)
         },
     );
     if traversal.reason == Some(StopReason::Cancelled) {
@@ -1582,7 +1767,7 @@ fn find_paths(
     };
     let mut relations = BTreeMap::new();
     let paths = traversal.paths.iter().map(|path| {
-        let edges = path.edges.iter().map(|id| filter_relation(graph.relation(id), args).unwrap()).collect::<Vec<_>>();
+        let edges = path.edges.iter().map(|id| filter_relation(graph.relation(id).clone(), args).unwrap()).collect::<Vec<_>>();
         for edge in &edges {
             relations.insert(edge.relation_id.clone(), edge.clone());
         }
@@ -1958,6 +2143,539 @@ mod tests {
         let resolved = crate::config::resolve(Some(temp.path()), Some(&config_path)).unwrap();
         let service = QueryService::new(Engine::new(resolved).unwrap());
         (temp, service)
+    }
+
+    #[test]
+    fn compact_graph_pages_match_eager_pages_with_filters_bounds_and_replay() {
+        let (_temp, service) = query_service();
+        let stored = stored(&[
+            (
+                "src/lib.rs",
+                "pub fn target() {}\npub fn left() { target(); entry(); }\npub fn right() { target(); }\npub fn entry() { left(); right(); target(); }\n",
+            ),
+            ("tests/calls.rs", "#[test]\nfn check() { target(); }\n"),
+        ]);
+        for tool in ["call_graph", "impact_of"] {
+            for direction in ["callers", "callees", "both"] {
+                for filter in [
+                    json!({}),
+                    json!({"source":["L1"],"certainty":["candidate"],"freshness":["current"]}),
+                    json!({"source":["L3"]}),
+                    json!({"path_prefix":"tests"}),
+                    json!({"depth":1}),
+                    json!({"max_nodes":2}),
+                ] {
+                    let mut args = json!({"symbol":"target","direction":direction,"limit":2});
+                    args.as_object_mut()
+                        .unwrap()
+                        .extend(filter.as_object().unwrap().clone());
+                    let eager = service
+                        .compute(tool, &args, &stored, json!({}), deadline())
+                        .unwrap();
+                    let (metadata, graph) = graph_result(
+                        envelope(&stored, json!({})),
+                        &stored,
+                        &args,
+                        tool,
+                        deadline(),
+                    )
+                    .unwrap();
+                    let mut expected = service
+                        .page(Page::new(
+                            tool.into(),
+                            args.clone(),
+                            eager,
+                            vec!["relations".into()],
+                            0,
+                        ))
+                        .unwrap();
+                    let mut actual = service
+                        .page(
+                            Page::new(
+                                tool.into(),
+                                args.clone(),
+                                metadata,
+                                vec!["relations".into()],
+                                0,
+                            )
+                            .with_graph(Some(GraphRelations::new(graph.edges, &stored).unwrap())),
+                        )
+                        .unwrap();
+                    let mut seen = BTreeSet::new();
+                    loop {
+                        let expected_cursor = expected["output"]["continuation"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("next_cursor");
+                        let actual_cursor = actual["output"]["continuation"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("next_cursor");
+                        assert_eq!(actual, expected, "{tool} {args}");
+                        for relation in actual["relations"].as_array().unwrap() {
+                            assert!(
+                                seen.insert(relation["relation_id"].as_str().unwrap().to_owned())
+                            );
+                        }
+                        let Some(cursor) = actual_cursor else {
+                            assert!(expected_cursor.is_none());
+                            break;
+                        };
+                        let cursor_args = json!({"cursor":cursor});
+                        let replay = service
+                            .execute(tool, cursor_args.clone(), deadline())
+                            .unwrap();
+                        actual = service.execute(tool, cursor_args, deadline()).unwrap();
+                        let mut replay = replay;
+                        replay["output"]["continuation"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("next_cursor");
+                        let mut replayed = actual.clone();
+                        replayed["output"]["continuation"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("next_cursor");
+                        assert_eq!(replayed, replay);
+                        expected = service
+                            .execute(tool, json!({"cursor":expected_cursor.unwrap()}), deadline())
+                            .unwrap();
+                    }
+                }
+            }
+        }
+        service.engine.shutdown();
+    }
+
+    #[test]
+    fn compact_graph_cursor_fits_without_pinning_the_view_and_keeps_origin_coordinates() {
+        let (_temp, service) = query_service();
+        let mut source = "pub fn target() {}\n".to_owned();
+        for caller in 0..129 {
+            source.push_str(&format!(
+                "pub fn caller_{caller}() {{ {} }}\n",
+                "target();".repeat(8)
+            ));
+        }
+        let stored = stored(&[("src/lib.rs", &source)]);
+        let view = Arc::downgrade(&stored.view);
+        let args = json!({"symbol":"target","limit":100});
+        let (metadata, mut graph) = graph_result(
+            envelope(&stored, json!({})),
+            &stored,
+            &args,
+            "impact_of",
+            deadline(),
+        )
+        .unwrap();
+        let total = graph.edges.len();
+        assert!(total >= 1032);
+        graph.edges[0].0.origin = Some(RelationOrigin {
+            snapshot_id: "original-snapshot".into(),
+            epochs: stored.view.epochs.clone(),
+            file_hash: "original-file-hash".into(),
+            reason: "retained".into(),
+        });
+        for source in ["L2", "L3"] {
+            graph.edges[0].0.evidence.push(Evidence {
+                evidence_id: format!("evidence-{source}-中文"),
+                source: source.into(),
+                indexer: "indexer-中文".into(),
+                derivation: "derived-调用".into(),
+                file_hash: "hash-中文".into(),
+                certainty: Certainty::Definite,
+            });
+        }
+        graph.edges[1].0.to_symbol = "missing-目标".into();
+        graph.edges[2].0.file = "missing-文件.rs".into();
+        let mut eager = metadata.clone();
+        eager["relations"] = json!(
+            graph
+                .edges
+                .iter()
+                .map(|(relation, depth, path)| {
+                    let mut value = relation_value(relation, &stored);
+                    value["depth"] = json!(depth);
+                    value["path"] = json!(path);
+                    value
+                })
+                .collect::<Vec<_>>()
+        );
+        let eager = Page::new(
+            "impact_of".into(),
+            args.clone(),
+            eager,
+            vec!["relations".into()],
+            0,
+        );
+        let compact = Page::new(
+            "impact_of".into(),
+            args,
+            metadata,
+            vec!["relations".into()],
+            0,
+        )
+        .with_graph(Some(GraphRelations::new(graph.edges, &stored).unwrap()));
+        assert!(
+            compact.bytes * 2 < eager.bytes,
+            "compact={} eager={}",
+            compact.bytes,
+            eager.bytes
+        );
+        assert_eq!(
+            compact.values("relations", 0..total).unwrap(),
+            eager.values("relations", 0..total).unwrap()
+        );
+        assert_eq!(
+            compact.values("relations", 0..1).unwrap()[0]["location"]["coordinate_snapshot_id"],
+            "original-snapshot"
+        );
+        drop(stored);
+        assert!(view.upgrade().is_none());
+        let budget = compact.bytes + 512;
+        service
+            .engine
+            .state
+            .locked()
+            .resolved
+            .config
+            .index
+            .cursor_cache_bytes = budget;
+        assert_eq!(code(service.page(eager).unwrap_err()), "cursor_expired");
+        let first = service.page(compact).unwrap();
+        let mut next = first.clone();
+        let mut seen = BTreeSet::new();
+        loop {
+            assert_eq!(next["snapshot_id"], first["snapshot_id"]);
+            for relation in next["relations"].as_array().unwrap() {
+                assert!(seen.insert(relation["relation_id"].as_str().unwrap().to_owned()));
+            }
+            let Some(cursor) = next["output"]["continuation"]["next_cursor"].as_str() else {
+                assert_eq!(next["relations"].as_array().unwrap().len(), total % 100);
+                break;
+            };
+            next = service
+                .execute("impact_of", json!({"cursor":cursor}), deadline())
+                .unwrap();
+        }
+        assert_eq!(seen.len(), total);
+        service.engine.shutdown();
+    }
+
+    #[test]
+    fn report_pages_match_eager_pages_across_fields_blocks_and_replay() {
+        let (_temp, service) = query_service();
+        let args = json!({"symbol":"target","limit":127});
+        let mut result = json!({"snapshot_id":"frozen","epochs":{"syntax":1,"semantic":0},
+            "output":{"continuation":{}},"evidence_summary":{"exact":true},
+            "test_summary":{"candidate_count":260},"completeness":{"known_gaps":[]}});
+        let fields = [
+            "test_candidates",
+            "relations",
+            "relation_changes.added",
+            "relation_changes.removed",
+            "affected_modules",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        for (index, field) in fields.iter().enumerate() {
+            let length = if index == 3 { 0 } else { 260 };
+            set_list(&mut result, field, (0..length).map(|item| json!({
+                "relation_id":format!("{field}-{item}"),"name":"固定结果-中文",
+                "path":["first","second"],"location":{"file":"src/lib.rs","line":item+1},
+                "evidence":[{"source":"L3","certainty":"definite","indexer":"repeated-indexer"}]
+            })).collect());
+        }
+        let eager = Page::new(
+            "suggest_tests".into(),
+            args.clone(),
+            result.clone(),
+            fields.clone(),
+            0,
+        );
+        let compact = Page::build(
+            "suggest_tests".into(),
+            args,
+            result,
+            fields.clone(),
+            0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(compact.reports.len(), 4);
+        assert!(
+            compact.bytes * 2 < eager.bytes,
+            "compact={} eager={}",
+            compact.bytes,
+            eager.bytes
+        );
+        for field in &fields {
+            assert_eq!(compact.len(field), eager.len(field));
+            assert_eq!(
+                compact.values(field, 0..compact.len(field)).unwrap(),
+                eager.values(field, 0..eager.len(field)).unwrap()
+            );
+        }
+        let mut expected = service.page(eager).unwrap();
+        let mut actual = service.page(compact).unwrap();
+        loop {
+            let expected_cursor = expected["output"]["continuation"]
+                .as_object_mut()
+                .unwrap()
+                .remove("next_cursor");
+            let actual_cursor = actual["output"]["continuation"]
+                .as_object_mut()
+                .unwrap()
+                .remove("next_cursor");
+            assert_eq!(actual, expected);
+            let Some(cursor) = actual_cursor else { break };
+            let request = json!({"cursor":cursor});
+            actual = service
+                .execute("suggest_tests", request.clone(), deadline())
+                .unwrap();
+            let mut replay = service
+                .execute("suggest_tests", request, deadline())
+                .unwrap();
+            let mut frozen = actual.clone();
+            replay["output"]["continuation"]
+                .as_object_mut()
+                .unwrap()
+                .remove("next_cursor");
+            frozen["output"]["continuation"]
+                .as_object_mut()
+                .unwrap()
+                .remove("next_cursor");
+            assert_eq!(frozen, replay);
+            expected = service
+                .execute(
+                    "suggest_tests",
+                    json!({"cursor":expected_cursor.unwrap()}),
+                    deadline(),
+                )
+                .unwrap();
+        }
+        service.engine.shutdown();
+    }
+
+    #[test]
+    fn typed_test_suggestions_match_json_paths_with_filters_and_truncation() {
+        let (temp, service) = query_service();
+        std::fs::create_dir(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src/lib.rs"),
+            "pub fn target() {}\nfn helper() { target(); }\n#[test]\nfn direct() { target(); }\n#[test]\n#[ignore]\nfn indirect() { helper(); }\n#[test]\nfn reference() { let callback = target; }\n").unwrap();
+        service.engine.scan(false).unwrap();
+        let (stored, fresh) = service.engine.bind(&json!({}), deadline()).unwrap();
+        for filter in [
+            json!({}),
+            json!({"depth":1}),
+            json!({"max_nodes":2}),
+            json!({"source":["L3"]}),
+            json!({"path_prefix":"src"}),
+        ] {
+            let mut args = json!({"symbol":"target","limit":2});
+            args.as_object_mut()
+                .unwrap()
+                .extend(filter.as_object().unwrap().clone());
+            let (metadata, graph) = graph_result(
+                envelope(&stored, fresh.clone()),
+                &stored,
+                &args,
+                "impact_of",
+                deadline(),
+            )
+            .unwrap();
+            let relations = json!(graph_values(&graph.edges, &stored));
+            let mut eager = metadata.clone();
+            eager["relations"] = relations.clone();
+            let expected = suggestions::report(&service, eager, &args, deadline(), None).unwrap();
+            let mut actual =
+                suggestions::report(&service, metadata, &args, deadline(), Some(&graph)).unwrap();
+            actual["relations"] = relations;
+            assert_eq!(actual, expected, "{args}");
+        }
+        service.engine.shutdown();
+    }
+
+    #[test]
+    fn borrowed_relation_filters_match_normalized_evidence_and_origins() {
+        let stored = stored(&[(
+            "src/lib.rs",
+            "pub fn target() {}\nfn caller() { target(); }\n",
+        )]);
+        let template = stored
+            .index()
+            .adjacent(
+                &stored
+                    .view
+                    .snapshot
+                    .syntax
+                    .symbols
+                    .iter()
+                    .find(|symbol| symbol.name == "target")
+                    .unwrap()
+                    .symbol_id,
+                Direction::Incoming,
+            )
+            .pop()
+            .unwrap();
+        for mask in 0..8 {
+            for origin in [false, true] {
+                for certainty in [Certainty::Candidate, Certainty::Definite] {
+                    for freshness in ["current", "pending", "stale"] {
+                        let mut relation = template.clone();
+                        relation.certainty = certainty.clone();
+                        relation.freshness = freshness.into();
+                        relation.origin = origin.then(|| RelationOrigin {
+                            snapshot_id: "old".into(),
+                            epochs: stored.view.epochs.clone(),
+                            file_hash: "old-hash".into(),
+                            reason: "retained".into(),
+                        });
+                        relation.evidence = ["L1", "L2", "L3"]
+                            .into_iter()
+                            .enumerate()
+                            .filter(|(index, _)| mask & (1 << index) != 0)
+                            .map(|(index, source)| Evidence {
+                                evidence_id: source.into(),
+                                source: source.into(),
+                                indexer: "indexer".into(),
+                                derivation: "derivation".into(),
+                                file_hash: "hash".into(),
+                                certainty: if index == 1 {
+                                    Certainty::Candidate
+                                } else {
+                                    Certainty::Definite
+                                },
+                            })
+                            .collect();
+                        for source in [
+                            Value::Null,
+                            json!([]),
+                            json!(["L1"]),
+                            json!(["L2"]),
+                            json!(["L3"]),
+                            json!(["L1", "L3"]),
+                        ] {
+                            for requested_certainty in
+                                [Value::Null, json!(["candidate"]), json!(["definite"])]
+                            {
+                                for requested_freshness in
+                                    [Value::Null, json!(["current"]), json!(["pending", "stale"])]
+                                {
+                                    for path in ["src", "tests"] {
+                                        let args = json!({"source":source,"certainty":requested_certainty,"freshness":requested_freshness,"path_prefix":path});
+                                        let mut expected = relation.clone();
+                                        if let Some(sources) = source.as_array() {
+                                            expected.evidence.retain(|evidence| {
+                                                sources.contains(&json!(evidence.source))
+                                            });
+                                            if expected.origin.is_some()
+                                                && expected
+                                                    .evidence
+                                                    .iter()
+                                                    .all(|evidence| evidence.source == "L1")
+                                            {
+                                                expected.origin = None;
+                                                expected.freshness = "current".into();
+                                            }
+                                            expected.certainty = if expected.origin.is_none()
+                                                && expected.evidence.iter().any(|evidence| {
+                                                    evidence.certainty == Certainty::Definite
+                                                }) {
+                                                Certainty::Definite
+                                            } else {
+                                                Certainty::Candidate
+                                            };
+                                        }
+                                        let accepted = prefix(&expected.file, &args)
+                                            && (source.is_null() || !expected.evidence.is_empty())
+                                            && !requested_certainty.as_array().is_some_and(
+                                                |values| {
+                                                    !values.contains(&json!(expected.certainty))
+                                                },
+                                            )
+                                            && !requested_freshness.as_array().is_some_and(
+                                                |values| {
+                                                    !values.contains(&json!(expected.freshness))
+                                                },
+                                            );
+                                        assert_eq!(
+                                            relation_matches(&relation, &args),
+                                            accepted,
+                                            "{args}"
+                                        );
+                                        assert_eq!(
+                                            serde_json::to_value(filter_relation(
+                                                relation.clone(),
+                                                &args
+                                            ))
+                                            .unwrap(),
+                                            json!(accepted.then_some(expected)),
+                                            "{args}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn impact_cursor_keeps_frozen_results_after_source_refresh_and_rejects_changed_args() {
+        let (temp, service) = query_service();
+        let source = temp.path().join("src/lib.rs");
+        std::fs::create_dir(source.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source,
+            "pub fn target() {}\npub fn caller() { target(); target(); target(); }\n",
+        )
+        .unwrap();
+        let first = service
+            .execute(
+                "impact_of",
+                json!({"symbol":"target","limit":1}),
+                deadline(),
+            )
+            .unwrap();
+        let cursor = first["output"]["continuation"]["next_cursor"]
+            .as_str()
+            .unwrap();
+        let before = service
+            .execute("impact_of", json!({"cursor":cursor}), deadline())
+            .unwrap();
+        std::fs::write(&source, "pub fn unrelated() {}\n").unwrap();
+        service.engine.scan(false).unwrap();
+        let after = service
+            .execute("impact_of", json!({"cursor":cursor}), deadline())
+            .unwrap();
+        assert_eq!(after["relations"], before["relations"]);
+        assert_eq!(after["snapshot_id"], first["snapshot_id"]);
+        assert_eq!(after["epochs"], first["epochs"]);
+        assert_eq!(after["evidence_summary"], first["evidence_summary"]);
+        assert_eq!(
+            code(
+                service
+                    .execute(
+                        "impact_of",
+                        json!({"cursor":cursor,"max_nodes":1}),
+                        deadline()
+                    )
+                    .unwrap_err()
+            ),
+            "invalid_argument"
+        );
+        assert_eq!(
+            code(
+                service
+                    .execute("call_graph", json!({"cursor":cursor}), deadline())
+                    .unwrap_err()
+            ),
+            "cursor_expired"
+        );
+        service.engine.shutdown();
     }
 
     #[test]

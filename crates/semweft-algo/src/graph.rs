@@ -1,12 +1,15 @@
 //! Bounded breadth-first traversal with stable paths and explicit unfinished work.
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    hash::Hash,
+};
 
 /// Neighbors must be ordered by a stable edge key, then by node key.
 /// Edge keys identify edges globally; the same key may be exposed at both ends
 /// when traversing an undirected view of a directed graph.
 pub trait GraphView {
-    type Node: Clone + Ord;
-    type Edge: Clone + Ord;
+    type Node: Clone + Ord + Hash;
+    type Edge: Clone + Ord + Hash;
 
     fn neighbors(&self, node: &Self::Node) -> impl Iterator<Item = (Self::Edge, Self::Node)>;
 }
@@ -14,7 +17,7 @@ pub trait GraphView {
 /// An adjacency representation that enforces the ordering required by GraphView.
 pub type Adjacency<N, E> = BTreeMap<N, BTreeSet<(E, N)>>;
 
-impl<N: Clone + Ord, E: Clone + Ord> GraphView for Adjacency<N, E> {
+impl<N: Clone + Ord + Hash, E: Clone + Ord + Hash> GraphView for Adjacency<N, E> {
     type Node = N;
     type Edge = E;
 
@@ -97,61 +100,75 @@ pub fn breadth_first_filtered<G: GraphView>(
     mut checkpoint: impl FnMut() -> Result<(), Interrupt>,
     mut include: impl FnMut(&G::Edge) -> bool,
 ) -> Traversal<G::Node, G::Edge> {
-    let mut result = Traversal {
-        nodes: BTreeSet::new(),
-        edges: BTreeMap::new(),
-        frontier: BTreeSet::new(),
-        reason: None,
-    };
     if limits.max_nodes == 0 {
-        result.frontier.insert(root);
-        result.reason = Some(StopReason::NodeLimit);
-        return result;
+        return Traversal {
+            nodes: BTreeSet::new(),
+            edges: BTreeMap::new(),
+            frontier: BTreeSet::from([root]),
+            reason: Some(StopReason::NodeLimit),
+        };
     }
-    result.nodes.insert(root.clone());
+    let mut nodes = HashSet::new();
+    let mut edges = HashMap::new();
+    let mut frontier = HashSet::new();
+    let mut reason = None;
+    nodes.insert(root.clone());
     let mut queue = VecDeque::from([(root, 0, Vec::new())]);
     'nodes: while let Some((node, depth, path)) = queue.pop_front() {
         if let Err(interrupt) = checkpoint() {
-            result.reason = result.reason.max(Some(interrupt.into()));
-            result.frontier.insert(node);
+            reason = reason.max(Some(interrupt.into()));
+            frontier.insert(node);
             break;
         }
         for (edge, next) in graph.neighbors(&node) {
             if let Err(interrupt) = checkpoint() {
-                result.reason = result.reason.max(Some(interrupt.into()));
-                result.frontier.insert(node.clone());
+                reason = reason.max(Some(interrupt.into()));
+                frontier.insert(node.clone());
                 break 'nodes;
             }
             if !include(&edge) {
                 continue;
             }
             if depth >= limits.max_depth {
-                if !result.edges.contains_key(&edge) {
-                    result.frontier.insert(node.clone());
-                    result.reason = result.reason.max(Some(StopReason::DepthLimit));
+                if !edges.contains_key(&edge) {
+                    frontier.insert(node.clone());
+                    reason = reason.max(Some(StopReason::DepthLimit));
                 }
                 continue;
             }
-            if !result.nodes.contains(&next) && result.nodes.len() >= limits.max_nodes {
-                result.frontier.insert(node.clone());
-                result.reason = result.reason.max(Some(StopReason::NodeLimit));
+            if !nodes.contains(&next) && nodes.len() >= limits.max_nodes {
+                frontier.insert(node.clone());
+                reason = reason.max(Some(StopReason::NodeLimit));
+                continue;
+            }
+            let new_edge = !edges.contains_key(&edge);
+            let discovered = nodes.insert(next.clone());
+            if !new_edge && !discovered {
                 continue;
             }
             let mut next_path = path.clone();
             next_path.push(edge.clone());
-            result.edges.entry(edge).or_insert_with(|| EdgeVisit {
-                depth: depth + 1,
-                path: next_path.clone(),
-            });
-            if result.nodes.insert(next.clone()) {
-                queue.push_back((next, depth + 1, next_path));
+            if discovered {
+                queue.push_back((next, depth + 1, next_path.clone()));
+            }
+            if new_edge {
+                edges.insert(
+                    edge,
+                    EdgeVisit {
+                        depth: depth + 1,
+                        path: next_path,
+                    },
+                );
             }
         }
     }
-    result
-        .frontier
-        .extend(queue.into_iter().map(|(node, _, _)| node));
-    result
+    frontier.extend(queue.into_iter().map(|(node, _, _)| node));
+    Traversal {
+        nodes: nodes.into_iter().collect(),
+        edges: edges.into_iter().collect(),
+        frontier: frontier.into_iter().collect(),
+        reason,
+    }
 }
 
 #[cfg(test)]
@@ -176,6 +193,15 @@ mod tests {
             },
             || Ok(()),
         )
+    }
+
+    #[test]
+    fn repeated_edge_keys_still_expand_new_endpoints() {
+        let result = walk(&graph(&[(1, 0, 1), (1, 0, 2), (2, 2, 3)]), 10, 10);
+        assert_eq!(result.nodes, BTreeSet::from([0, 1, 2, 3]));
+        assert_eq!(result.edges[&1].path, [1]);
+        assert_eq!(result.edges[&2].path, [1, 2]);
+        assert_eq!(result.reason, None);
     }
 
     #[test]
