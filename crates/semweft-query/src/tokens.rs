@@ -45,3 +45,80 @@ pub fn finalize(value: &mut Value) -> Result<()> {
     }
     anyhow::bail!("internal_error: serialized token count did not stabilize")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supported_tokenizers_match_the_embedded_vocabularies() {
+        assert!(supported(CL100K));
+        assert!(supported(O200K));
+        assert!(!supported("estimated"));
+        assert!(!supported("cl100k_base"));
+        assert!(!supported("o200k_base@other"));
+        assert!(!supported(""));
+        assert!(CL100K.contains("tiktoken-rs-0.12.1"));
+        assert!(O200K.contains("tiktoken-rs-0.12.1"));
+    }
+
+    #[test]
+    fn metadata_distinguishes_exact_estimated_and_unsupported_modes() {
+        let exact = metadata(CL100K, 4096);
+        assert_eq!(exact["mode"], "exact");
+        assert_eq!(exact["tokenizer"], CL100K);
+        assert_eq!(exact["requested_tokenizer"], CL100K);
+        assert_eq!(exact["budget"], 4096);
+        assert_eq!(exact["total"], 0);
+
+        let estimated = metadata("estimated", 1024);
+        assert_eq!(estimated["mode"], "estimated");
+        assert_eq!(estimated["tokenizer"], "estimated");
+        assert_eq!(estimated["reason"], "configured estimate");
+        assert!(estimated["method"].as_str().unwrap().contains("byte count"));
+
+        let fallback = metadata("unknown", 8);
+        assert_eq!(fallback["mode"], "estimated");
+        assert_eq!(fallback["tokenizer"], "estimated");
+        assert!(
+            fallback["reason"]
+                .as_str()
+                .unwrap()
+                .contains("unsupported tokenizer")
+        );
+    }
+
+    #[test]
+    fn count_uses_serialized_bytes_when_no_exact_tokenizer_is_selected() {
+        let value = json!({"a": [1, 2, 3], "text": "hello"});
+        let expected = serde_json::to_string(&value).unwrap().len() as u64;
+        assert_eq!(count(&value).unwrap(), expected);
+    }
+
+    #[test]
+    fn exact_counters_measure_the_complete_compact_json() {
+        for tokenizer in [CL100K, O200K] {
+            let value = json!({"token_count": {"tokenizer": tokenizer}, "text": "hello world"});
+            let text = serde_json::to_string(&value).unwrap();
+            let counted = count(&value).unwrap();
+            assert!(counted > 0, "{tokenizer}");
+            assert!(counted <= text.chars().count() as u64 + 1, "{tokenizer}");
+        }
+    }
+
+    #[test]
+    fn finalize_stabilizes_the_self_describing_total() {
+        let mut value = json!({
+            "output": {"symbols": ["a", "b", "c"]},
+            "token_count": metadata(CL100K, 4096),
+        });
+        finalize(&mut value).unwrap();
+        let total = value["token_count"]["total"].as_u64().unwrap();
+        assert!(total > 0);
+        assert_eq!(count(&value).unwrap(), total);
+        // Running again is idempotent.
+        let stable = value.clone();
+        finalize(&mut value).unwrap();
+        assert_eq!(value, stable);
+    }
+}

@@ -826,4 +826,94 @@ mod tests {
             .contains("cancelled")
         );
     }
+
+    #[test]
+    fn field_pointers_flatten_dotted_paths() {
+        assert_eq!(field_pointer("symbols"), "/symbols");
+        assert_eq!(field_pointer("output.symbols"), "/output/symbols");
+        assert_eq!(
+            field_pointer("output.continuation.edges"),
+            "/output/continuation/edges"
+        );
+        assert_eq!(field_pointer(""), "/");
+    }
+
+    #[test]
+    fn page_values_reads_arrays_and_ignores_missing_or_non_array_fields() {
+        let page = json!({
+            "output": {"symbols": [1, 2, 3], "edges": [], "scalar": 4},
+            "top": ["a"],
+        });
+        assert_eq!(
+            page_values(&page, "output.symbols").collect::<Vec<_>>(),
+            vec![&json!(1), &json!(2), &json!(3)]
+        );
+        assert!(page_values(&page, "output.edges").next().is_none());
+        assert!(page_values(&page, "output.scalar").next().is_none());
+        assert!(page_values(&page, "missing").next().is_none());
+        assert_eq!(
+            page_values(&page, "top").collect::<Vec<_>>(),
+            vec![&json!("a")]
+        );
+    }
+
+    #[test]
+    fn merge_page_appends_each_field_and_replaces_output() {
+        let mut result = json!({
+            "symbols": [{"id": "a"}],
+            "edges": [{"id": "e"}],
+            "other": true,
+            "output": {"continuation": {"next_cursor": "page-2"}},
+        });
+        let page = json!({
+            "symbols": [{"id": "b"}, {"id": "c"}],
+            "edges": [{"id": "f"}],
+            "other": false,
+            "output": {"continuation": null},
+        });
+        merge_page(&mut result, page, &["symbols", "edges"]);
+        assert_eq!(result["symbols"].as_array().unwrap().len(), 3);
+        assert_eq!(result["symbols"][2]["id"], "c");
+        assert_eq!(result["edges"].as_array().unwrap().len(), 2);
+        assert_eq!(result["other"], true, "unlisted fields are unchanged");
+        assert_eq!(result["output"], json!({"continuation": null}));
+    }
+
+    #[test]
+    fn merge_page_keeps_targets_that_are_not_arrays_and_tolerates_missing_pages() {
+        let mut result = json!({"symbols": "not-an-array", "edges": [1]});
+        merge_page(
+            &mut result,
+            json!({"symbols": [2], "edges": [3]}),
+            &["symbols", "edges", "absent"],
+        );
+        assert_eq!(result["symbols"], "not-an-array");
+        assert_eq!(result["edges"], json!([1, 3]));
+        assert!(
+            result.get("absent").is_none(),
+            "missing targets stay missing"
+        );
+        assert_eq!(result["output"], Value::Null);
+    }
+
+    #[test]
+    fn cancellation_starts_clear_and_reports_its_stage() {
+        let cancellation = Cancellation::default();
+        cancellation.check().unwrap();
+        assert_eq!(cancellation.progress(), "");
+        cancellation.stage("1/6 capturing").unwrap();
+        assert_eq!(cancellation.progress(), "1/6 capturing");
+        cancellation.cancel();
+        let error = cancellation.check().unwrap_err();
+        assert!(error.to_string().starts_with("cancelled:"), "{error}");
+        assert!(
+            cancellation.stage("2/6 indexing").is_err(),
+            "a cancelled operation cannot advance"
+        );
+        assert_eq!(
+            cancellation.progress(),
+            "1/6 capturing",
+            "the stage is preserved after cancellation"
+        );
+    }
 }
