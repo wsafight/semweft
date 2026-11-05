@@ -171,10 +171,11 @@ impl Desktop {
                     args["max_nodes"] = json!(5000);
                 }
             }
-            self.explorer.cancellation.cancel();
-            self.explorer.cancellation = client::Cancellation::default();
-            self.explorer.generation += 1;
-            self.explorer.seen.clear();
+            begin_page(
+                &mut self.explorer.cancellation,
+                &mut self.explorer.generation,
+                &mut self.explorer.seen,
+            );
             self.explorer.selected = 0;
             self.explorer.side = side;
             args
@@ -324,7 +325,7 @@ impl Desktop {
             <div class="flex gap-2 items-center mb-2">
                 {muted(format!("{} · {} 项 · {}", if self.explorer.side == "base" { "BASE" } else { "HEAD" }, self.explorer.rows.len(), if self.explorer.busy { "查询中" } else { "固定快照" }))}
                 {...report["output"]["continuation"]["next_cursor"].is_string().then(|| rsx! { <ActionButton id="explorer-more" compact disabledIf={self.explorer.busy} onClick={cx.listener(|this, _, _, cx| this.query_explorer(true, cx))}>{"加载下一页"}</ActionButton> })}
-                {...self.explorer.busy.then(|| rsx! { <ActionButton id="explorer-cancel" compact onClick={cx.listener(|this, _, _, cx| { this.explorer.cancellation.cancel(); this.explorer.generation += 1; this.explorer.busy = false; this.explorer.error = "已取消；可重新运行".into(); cx.notify(); })}>{"取消"}</ActionButton> })}
+                {...self.explorer.busy.then(|| rsx! { <ActionButton id="explorer-cancel" compact onClick={cx.listener(|this, _, _, cx| { cancel_page(&mut this.explorer.cancellation, &mut this.explorer.generation, &mut this.explorer.busy, &mut this.explorer.error, "已取消；可重新运行"); cx.notify(); })}>{"取消"}</ActionButton> })}
                 <ActionButton id="explorer-export" compact disabledIf={report.is_null()} onClick={cx.listener(|this, _, _, cx| this.explorer_export(cx))}>{"导出证据"}</ActionButton>
             </div>
             {...report["risk_summary"].is_object().then(|| rsx! { <div class="flex gap-3 mb-2">{...report["risk_summary"]["score"].as_u64().map(|score| rsx! { <StatCard label="风险分数" value={score as usize} /> })}<div base={muted(format!("{} · {} · 缺失观测不代表低风险", report["risk_summary"]["level"].as_str().unwrap_or("未评分"), report["risk_summary"]["confidence"].as_str().unwrap_or("未知置信度")))} /></div> })}

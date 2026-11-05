@@ -264,6 +264,33 @@ fn muted(value: impl Into<SharedString>) -> Div {
 fn heading(value: impl Into<SharedString>) -> Div {
     rsx! { <div font_weight={FontWeight::SEMIBOLD}>{value.into()}</div> }
 }
+
+/// Start a new paginated request, invalidating any in-flight one.
+fn begin_page(
+    cancellation: &mut client::Cancellation,
+    generation: &mut u64,
+    seen: &mut BTreeSet<String>,
+) -> u64 {
+    cancellation.cancel();
+    *cancellation = client::Cancellation::default();
+    *generation += 1;
+    seen.clear();
+    *generation
+}
+
+/// Cancel the active paginated request and record why on the owning view.
+fn cancel_page(
+    cancellation: &mut client::Cancellation,
+    generation: &mut u64,
+    busy: &mut bool,
+    error: &mut String,
+    message: &str,
+) {
+    cancellation.cancel();
+    *generation += 1;
+    *busy = false;
+    *error = message.into();
+}
 impl Desktop {
     fn new(mut launch: Launch, data: Preview, cx: &mut Context<Self>) -> Self {
         if launch.workspace.is_none() && !data.example {

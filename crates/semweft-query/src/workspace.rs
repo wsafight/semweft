@@ -261,6 +261,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_predicate_covers_rust_and_go_without_config_files() {
+        assert!(is_source("src/lib.rs"));
+        assert!(is_source("cmd/main.go"));
+        assert!(!is_source("README.md"));
+        assert!(!is_source("Cargo.toml"));
+        assert!(!is_source("src/lib.ts"));
+    }
+
+    #[test]
     fn captures_untracked_inputs_and_binary_hashes_but_respects_exclusions() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();

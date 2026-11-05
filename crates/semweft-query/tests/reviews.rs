@@ -41,6 +41,9 @@ fn review_binds_diff_snapshots_rules_and_invalidates_after_edits() {
     )
     .unwrap();
     let id = record["review_id"].as_str().unwrap();
+    let status = reviews::status(&resolved, &engine, id).unwrap();
+    assert_eq!(status["review_id"], json!(id));
+    assert_eq!(status["revision"], json!(0));
     let current = service
         .execute("get_review_result", json!({"review_id":id}), deadline())
         .unwrap();
