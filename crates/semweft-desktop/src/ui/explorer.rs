@@ -34,15 +34,10 @@ const FIELDS: [&str; 18] = [
 pub(super) struct Explorer {
     tool: usize,
     scope: usize,
-    busy: bool,
-    generation: u64,
-    pub(super) cancellation: client::Cancellation,
-    report: Value,
+    pub(super) page: PageState<Value>,
     rows: Vec<(String, Value)>,
     selected: usize,
-    error: String,
     error_code: String,
-    seen: BTreeSet<String>,
     risk_inputs: Option<Value>,
     risk_path: String,
     side: String,
@@ -51,7 +46,7 @@ pub(super) struct Explorer {
 
 impl Explorer {
     fn refresh_evidence(&mut self) {
-        let report = &self.report;
+        let report = &self.page.result;
         let selected = self
             .rows
             .get(self.selected)
@@ -61,9 +56,9 @@ impl Explorer {
     }
 
     pub(super) fn reset(&mut self) {
-        self.cancellation.cancel();
+        self.page.reset();
         *self = Self {
-            generation: self.generation + 1,
+            page: std::mem::take(&mut self.page),
             ..Default::default()
         };
     }
@@ -86,22 +81,25 @@ fn query_binding(
 
 impl Desktop {
     pub(super) fn query_explorer(&mut self, more: bool, cx: &mut Context<Self>) {
-        if self.explorer.busy || self.busy {
+        if self.explorer.page.busy || self.busy {
             return;
         }
         let tool = self.explorer.tool;
         let args = if more {
-            let Some(cursor) = self.explorer.report["output"]["continuation"]["next_cursor"]
+            let Some(cursor) = self.explorer.page.result["output"]["continuation"]["next_cursor"]
                 .as_str()
                 .map(str::to_owned)
             else {
                 return;
             };
-            if !self.explorer.seen.insert(cursor.clone()) {
-                self.explorer.error = "分页游标重复，请重新运行".into();
+            let Some(cursor) = self
+                .explorer
+                .page
+                .next_cursor(Some(cursor), "分页游标重复，请重新运行")
+            else {
                 cx.notify();
                 return;
-            }
+            };
             json!({"cursor":cursor,"timeout_ms":60000})
         } else {
             let side = if matches!(tool, 3 | 4) {
@@ -113,7 +111,7 @@ impl Desktop {
             let mut args = match query_binding(tool, symbols, self.data.fixed_diff()) {
                 Ok(args) => args,
                 Err(error) => {
-                    self.explorer.error = error.to_string();
+                    self.explorer.page.error = error.to_string();
                     cx.notify();
                     return;
                 }
@@ -123,7 +121,8 @@ impl Desktop {
             match tool {
                 0 => {
                     if input.is_empty() || target.is_empty() {
-                        self.explorer.error = "请填写起点和终点的符号、文件路径或服务名".into();
+                        self.explorer.page.error =
+                            "请填写起点和终点的符号、文件路径或服务名".into();
                         cx.notify();
                         return;
                     }
@@ -136,7 +135,7 @@ impl Desktop {
                 }
                 1 => {
                     if input.is_empty() {
-                        self.explorer.error = "请输入 Rust trait 或 trait 方法".into();
+                        self.explorer.page.error = "请输入 Rust trait 或 trait 方法".into();
                         cx.notify();
                         return;
                     }
@@ -171,21 +170,19 @@ impl Desktop {
                     args["max_nodes"] = json!(5000);
                 }
             }
-            begin_page(
-                &mut self.explorer.cancellation,
-                &mut self.explorer.generation,
-                &mut self.explorer.seen,
-            );
+            self.explorer.page.begin();
             self.explorer.selected = 0;
             self.explorer.side = side;
             args
         };
-        self.explorer.busy = true;
-        self.explorer.error.clear();
         self.explorer.error_code.clear();
-        let generation = self.explorer.generation;
+        let generation = if more {
+            self.explorer.page.start()
+        } else {
+            self.explorer.page.generation
+        };
         let client = self.client.clone();
-        let cancellation = self.explorer.cancellation.clone();
+        let cancellation = self.explorer.page.cancellation.clone();
         let binding = self.data.symbols_on(&self.explorer.side);
         let snapshot = binding.snapshot_id.clone();
         let epoch = binding.epochs["semantic"].as_u64().unwrap_or(0);
@@ -195,21 +192,20 @@ impl Desktop {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                if this.explorer.generation != generation {
+                if !this.explorer.page.finish(generation) {
                     return;
                 }
-                this.explorer.busy = false;
                 match result {
                     Ok(page) => {
                         if more {
-                            client::merge_page(&mut this.explorer.report, page, &FIELDS);
+                            client::merge_page(&mut this.explorer.page.result, page, &FIELDS);
                         } else {
-                            this.explorer.report = page;
+                            this.explorer.page.result = page;
                         }
                         this.explorer.rows = FIELDS
                             .iter()
                             .flat_map(|field| {
-                                client::page_values(&this.explorer.report, field)
+                                client::page_values(&this.explorer.page.result, field)
                                     .map(move |value| ((*field).to_owned(), value.clone()))
                             })
                             .collect();
@@ -221,7 +217,7 @@ impl Desktop {
                                 .ok()
                                 .and_then(|value| value["code"].as_str().map(str::to_owned))
                                 .unwrap_or_default();
-                        this.explorer.error = format!("查询未完成：{error:#}");
+                        this.explorer.page.error = format!("查询未完成：{error:#}");
                     }
                 }
                 cx.notify();
@@ -260,9 +256,9 @@ impl Desktop {
                                 json!({"head":value})
                             });
                             this.explorer.risk_path = path.display().to_string();
-                            this.explorer.error.clear();
+                            this.explorer.page.error.clear();
                         }
-                        Err(error) => this.explorer.error = format!("观测读取失败：{error:#}"),
+                        Err(error) => this.explorer.page.error = format!("观测读取失败：{error:#}"),
                     }
                     cx.notify();
                 });
@@ -272,7 +268,7 @@ impl Desktop {
     }
 
     fn explorer_export(&self, cx: &mut Context<Self>) {
-        let value = json!({"type":"semweft_desktop_query","tool":TOOLS[self.explorer.tool].0,"report":self.explorer.report});
+        let value = json!({"type":"semweft_desktop_query","tool":TOOLS[self.explorer.tool].0,"report":self.explorer.page.result});
         let prompt = cx.prompt_for_new_path(&self.data.workspace, Some("semweft-query.json"));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = prompt.await {
@@ -292,7 +288,7 @@ impl Desktop {
     }
 
     pub(super) fn explorer_panel(&self, cx: &Context<Self>) -> gpui::AnyElement {
-        let report = &self.explorer.report;
+        let report = &self.explorer.page.result;
         let selected = self
             .explorer
             .rows
@@ -312,31 +308,29 @@ impl Desktop {
             }).collect::<Vec<_>>()
         }));
         rsx! { <div class="flex flex-col flex-1 min-h-0">
-            <div class="flex flex-wrap gap-2 mb-2">{for (index, (_, label)) in TOOLS.into_iter().enumerate() { <ActionButton id={("explorer-tool", index)} compact activeIf={index == self.explorer.tool} disabledIf={self.explorer.busy} onClick={cx.listener(move |this, _, _, cx| { this.explorer.tool = index; this.explorer.report = Value::Null; this.explorer.rows.clear(); this.explorer.error.clear(); this.explorer.refresh_evidence(); cx.notify(); })}>{label}</ActionButton> }}</div>
+            <div class="flex flex-wrap gap-2 mb-2">{for (index, (_, label)) in TOOLS.into_iter().enumerate() { <ActionButton id={("explorer-tool", index)} compact activeIf={index == self.explorer.tool} disabledIf={self.explorer.page.busy} onClick={cx.listener(move |this, _, _, cx| { this.explorer.tool = index; this.explorer.page.result = Value::Null; this.explorer.rows.clear(); this.explorer.page.error.clear(); this.explorer.refresh_evidence(); cx.notify(); })}>{label}</ActionButton> }}</div>
             <div class="flex gap-2 items-center p-3 bg-white border rounded-xl mb-2" border_color={rgb(LINE)}>
                 <div class="flex-1 h-[28px]">{self.explore_from.clone()}</div>
                 {...(self.explorer.tool == 0).then(|| rsx! { <div class="flex-1 h-[28px]">{self.explore_to.clone()}</div> })}
-                <ActionButton id="explorer-run" disabledIf={self.explorer.busy || self.busy} onClick={cx.listener(|this, _, _, cx| this.query_explorer(false, cx))}>{"运行查询"}</ActionButton>
-                <ActionButton id="explorer-current" compact disabledIf={self.explorer.busy} onClick={cx.listener(|this, _, _, cx| { let name = this.source_symbol().map(|symbol| symbol.symbol_id.clone()).unwrap_or_else(|| this.source_file.clone()); this.explore_from.update(cx, |input, cx| input.set_value(name, cx)); })}>{"填入当前符号"}</ActionButton>
+                <ActionButton id="explorer-run" disabledIf={self.explorer.page.busy || self.busy} onClick={cx.listener(|this, _, _, cx| this.query_explorer(false, cx))}>{"运行查询"}</ActionButton>
+                <ActionButton id="explorer-current" compact disabledIf={self.explorer.page.busy} onClick={cx.listener(|this, _, _, cx| { let name = this.source_symbol().map(|symbol| symbol.symbol_id.clone()).unwrap_or_else(|| this.source_file.clone()); this.explore_from.update(cx, |input, cx| input.set_value(name, cx)); })}>{"填入当前符号"}</ActionButton>
             </div>
-            {...(self.explorer.tool == 0).then(|| rsx! { <div class="flex gap-2 mb-2">{for (index, label) in ["符号", "文件模块", "显式服务"].into_iter().enumerate() { <ActionButton id={("explorer-scope", index)} compact activeIf={self.explorer.scope == index} disabledIf={self.explorer.busy} onClick={cx.listener(move |this, _, _, cx| { this.explorer.scope = index; cx.notify(); })}>{label}</ActionButton> }}</div> })}
+            {...(self.explorer.tool == 0).then(|| rsx! { <div class="flex gap-2 mb-2">{for (index, label) in ["符号", "文件模块", "显式服务"].into_iter().enumerate() { <ActionButton id={("explorer-scope", index)} compact activeIf={self.explorer.scope == index} disabledIf={self.explorer.page.busy} onClick={cx.listener(move |this, _, _, cx| { this.explorer.scope = index; cx.notify(); })}>{label}</ActionButton> }}</div> })}
             {...(self.explorer.tool == 3).then(|| rsx! { <div class="flex gap-2 items-center mb-2"><ActionButton id="risk-import" compact onClick={cx.listener(|this, _, _, cx| this.explorer_risk_inputs(cx))}>{"导入覆盖/热点观测"}</ActionButton><ActionButton id="risk-clear" compact onClick={cx.listener(|this, _, _, cx| { this.explorer.risk_inputs = None; this.explorer.risk_path.clear(); cx.notify(); })}>{"清除观测"}</ActionButton><div base={muted(self.explorer.risk_path.clone())} class="truncate flex-1" /></div> })}
-            {...(!self.explorer.error.is_empty()).then(|| rsx! { <EmptyState warning label={self.explorer.error.clone()} /> })}
-            <div class="flex gap-2 items-center mb-2">
-                {muted(format!("{} · {} 项 · {}", if self.explorer.side == "base" { "BASE" } else { "HEAD" }, self.explorer.rows.len(), if self.explorer.busy { "查询中" } else { "固定快照" }))}
-                {...report["output"]["continuation"]["next_cursor"].is_string().then(|| rsx! { <ActionButton id="explorer-more" compact disabledIf={self.explorer.busy} onClick={cx.listener(|this, _, _, cx| this.query_explorer(true, cx))}>{"加载下一页"}</ActionButton> })}
-                {...self.explorer.busy.then(|| rsx! { <ActionButton id="explorer-cancel" compact onClick={cx.listener(|this, _, _, cx| { cancel_page(&mut this.explorer.cancellation, &mut this.explorer.generation, &mut this.explorer.busy, &mut this.explorer.error, "已取消；可重新运行"); cx.notify(); })}>{"取消"}</ActionButton> })}
-                <ActionButton id="explorer-export" compact disabledIf={report.is_null()} onClick={cx.listener(|this, _, _, cx| this.explorer_export(cx))}>{"导出证据"}</ActionButton>
-            </div>
+            {...(!self.explorer.page.error.is_empty()).then(|| rsx! { <EmptyState warning label={self.explorer.page.error.clone()} /> })}
+            <QueryToolbar id_prefix="explorer" compact busyIf={self.explorer.page.busy}
+                hasMoreIf={report["output"]["continuation"]["next_cursor"].is_string()} canExportIf={!report.is_null()}
+                status={format!("{} · {} 项 · {}", if self.explorer.side == "base" { "BASE" } else { "HEAD" }, self.explorer.rows.len(), if self.explorer.page.busy { "查询中" } else { "固定快照" })}
+                onMore={cx.listener(|this, _, _, cx| this.query_explorer(true, cx))}
+                onCancel={cx.listener(|this, _, _, cx| { this.explorer.page.cancel("已取消；可重新运行"); cx.notify(); })}
+                onExport={cx.listener(|this, _, _, cx| this.explorer_export(cx))} />
             {...report["risk_summary"].is_object().then(|| rsx! { <div class="flex gap-3 mb-2">{...report["risk_summary"]["score"].as_u64().map(|score| rsx! { <StatCard label="风险分数" value={score as usize} /> })}<div base={muted(format!("{} · {} · 缺失观测不代表低风险", report["risk_summary"]["level"].as_str().unwrap_or("未评分"), report["risk_summary"]["confidence"].as_str().unwrap_or("未知置信度")))} /></div> })}
-            <div class="flex flex-1 min-h-0 border bg-white rounded-xl overflow-hidden" border_color={rgb(LINE)}>
-                <div class="flex flex-col min-h-0 border-r" w={gpui::relative(0.43)} border_color={rgb(LINE)}><div base={rows} class="flex-1 min-h-0" />{...(self.explorer.rows.is_empty()).then(|| rsx! { <EmptyState label="尚无结果；零结果请结合分析范围和缺口核查。" /> })}</div>
-                <div id="explorer-evidence" class="flex-1 min-w-0 overflow-y-scroll p-3">
-                    {heading("结果、证据与分析范围")}
-                    <div class="flex flex-wrap gap-2 my-2">{for (index, (side, location)) in locations.into_iter().enumerate() { <ActionButton id={("explorer-source", index)} compact disabledIf={self.data.verify_location_on(&location, &side).is_err()} onClick={cx.listener({ let location = location.clone(); let side = side.clone(); move |this, _, _, cx| { this.open_side(location.file.clone(), location.line, &side, true, cx); this.page = Page::Files; } })}>{format!("{} {}:{}", side.to_uppercase(), location.file, location.line)}</ActionButton> }}</div>
-                    <div font_family="Menlo" text_size={px(10.)}>{for line in self.explorer.evidence.lines() { <div>{line.to_owned()}</div> }}</div>
-                </div>
-            </div>
+            <EvidencePanel id="explorer-evidence" title="结果、证据与分析范围" text={self.explorer.evidence.clone()} compact
+                results={rows.into_any_element()} results_width={0.43f32}
+                empty_label={self.explorer.rows.is_empty().then(|| "尚无结果；零结果请结合分析范围和缺口核查。".into())}
+                actions={rsx_fragment! { <>
+                    {for (index, (side, location)) in locations.into_iter().enumerate() { <ActionButton id={("explorer-source", index)} compact disabledIf={self.data.verify_location_on(&location, &side).is_err()} onClick={cx.listener({ let location = location.clone(); let side = side.clone(); move |this, _, _, cx| { this.open_side(location.file.clone(), location.line, &side, true, cx); this.page = Page::Files; } })}>{format!("{} {}:{}", side.to_uppercase(), location.file, location.line)}</ActionButton> }}
+                </> }} />
         </div> }.into_any_element()
     }
 }
@@ -355,8 +349,7 @@ fn locations(value: &Value, default_side: &str) -> Vec<(String, crate::model::Lo
             .as_str()
             .filter(|side| matches!(*side, "base" | "head"))
             .unwrap_or(side);
-        if let Ok(location) =
-            <crate::model::Location as serde::Deserialize>::deserialize(value)
+        if let Ok(location) = <crate::model::Location as serde::Deserialize>::deserialize(value)
             && !location.file.is_empty()
             && location.line > 0
             && !location.file_hash.is_empty()
@@ -409,11 +402,11 @@ pub(super) fn check_explorer_views(
     window.on_next_frame(move |window, cx| {
         if waiting {
             let state = &view.read(cx).explorer;
-            if state.busy { assert!(retries < 7200, "Explorer query did not finish"); check_explorer_views(view, tool, true, retries + 1, window); return; }
+            if state.page.busy { assert!(retries < 7200, "Explorer query did not finish"); check_explorer_views(view, tool, true, retries + 1, window); return; }
             let no_trait = !view.read(cx).data.symbols_on(&state.side).symbols.iter().any(|symbol| symbol.kind == "trait");
-            if tool == 1 && no_trait { assert_eq!(state.error_code, "symbol_not_found", "{}", state.error); }
-            else if tool == 5 && state.error_code == "capability_unsupported" { assert!(state.error.contains("service dependencies require configured services"), "{}", state.error); }
-            else { assert!(state.error.is_empty(), "{}: {}", TOOLS[tool].0, state.error); assert!(state.report["snapshot_id"].is_string()); }
+            if tool == 1 && no_trait { assert_eq!(state.error_code, "symbol_not_found", "{}", state.page.error); }
+            else if tool == 5 && state.error_code == "capability_unsupported" { assert!(state.page.error.contains("service dependencies require configured services"), "{}", state.page.error); }
+            else { assert!(state.page.error.is_empty(), "{}: {}", TOOLS[tool].0, state.page.error); assert!(state.page.result["snapshot_id"].is_string()); }
             check_explorer_views(view, tool + 1, false, 0, window);
         } else if tool < TOOLS.len() {
             view.update(cx, |this, cx| {
@@ -431,7 +424,7 @@ pub(super) fn check_explorer_views(
             if view.read(cx).launch.keep_open {
                 view.update(cx, |this, cx| {
                     this.page = Page::Overview;
-                    this.explorer.error.clear();
+                    this.explorer.page.error.clear();
                     this.explorer.error_code.clear();
                     cx.notify();
                 });

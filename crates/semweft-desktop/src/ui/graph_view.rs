@@ -8,7 +8,8 @@ use std::{
 };
 
 #[derive(PartialEq, Eq)]
-struct LayoutKey {    view: String,
+struct LayoutKey {
+    view: String,
     side: String,
     root: String,
     file: String,
@@ -38,7 +39,11 @@ pub(super) struct GraphView {
     layout: RefCell<Option<(LayoutKey, Rc<Diagram>)>>,
     placed: RefCell<Option<(usize, usize, u64, Rc<Diagram>)>>,
     positions_revision: u64,
-    comparison_pairs: Option<(String, BTreeSet<(String, String)>, BTreeSet<(String, String)>)>,
+    comparison_pairs: Option<(
+        String,
+        BTreeSet<(String, String)>,
+        BTreeSet<(String, String)>,
+    )>,
 }
 
 impl Default for GraphView {
@@ -73,8 +78,8 @@ impl LayoutKey {
             && self.side == desktop.navigation_side
             && self.root == desktop.navigation_symbol
             && self.file == desktop.source_file
-            && self.relations == desktop.navigation.relations.len()
-            && self.nodes == desktop.navigation.nodes.len()
+            && self.relations == desktop.navigation.result.relations.len()
+            && self.nodes == desktop.navigation.result.nodes.len()
             && self.dependencies == desktop.graph_view.dependencies
             && self.comparison == desktop.graph_view.comparison
             && self.grouped == desktop.graph_view.grouped
@@ -186,8 +191,7 @@ impl Desktop {
             diagram.arrange(mode, &self.graph_view.positions);
             Rc::new(diagram)
         };
-        *self.graph_view.placed.borrow_mut() =
-            Some((pointer, mode, revision, placed.clone()));
+        *self.graph_view.placed.borrow_mut() = Some((pointer, mode, revision, placed.clone()));
         placed
     }
 
@@ -225,11 +229,9 @@ impl Desktop {
             .flat_map(|relation| [&relation.from, &relation.to])
             .cloned()
             .collect::<BTreeSet<_>>();
-        self.navigation_cancel.cancel();
-        self.navigation_generation += 1;
-        self.navigation_busy = false;
-        self.navigation.relations = relations;
-        self.navigation.nodes = self
+        self.navigation.reset();
+        self.navigation.result.relations = relations;
+        self.navigation.result.nodes = self
             .data
             .symbols
             .symbols
@@ -311,8 +313,8 @@ impl Desktop {
             side: self.navigation_side.clone(),
             root: self.navigation_symbol.clone(),
             file: self.source_file.clone(),
-            relations: self.navigation.relations.len(),
-            nodes: self.navigation.nodes.len(),
+            relations: self.navigation.result.relations.len(),
+            nodes: self.navigation.result.nodes.len(),
             dependencies: self.graph_view.dependencies,
             comparison: self.graph_view.comparison,
             grouped: self.graph_view.grouped,
@@ -365,8 +367,8 @@ impl Desktop {
                     .symbols_on(&self.navigation_side)
                     .symbols
                     .iter()
-                    .chain(&self.navigation.nodes),
-                &self.navigation.relations,
+                    .chain(&self.navigation.result.nodes),
+                &self.navigation.result.relations,
                 self.graph_view.grouped,
                 &self.graph_view.collapsed,
             )
@@ -571,7 +573,7 @@ impl Desktop {
                     <ActionButton id="graph-reset" compact onClick={cx.listener(|this, _, _, cx| { this.graph_view.zoom = 1.; this.graph_view.pan = (0., 0.); this.graph_view.collapsed.clear(); this.graph_view.positions.clear(); this.graph_view.positions_revision += 1; this.save_graph(cx); })}>{"重置"}</ActionButton>
                     {...(!self.graph_view.dependencies).then(|| rsx! { <ActionButton id="graph-group" compact activeIf={self.graph_view.grouped} onClick={cx.listener(|this, _, _, cx| { this.graph_view.grouped = !this.graph_view.grouped; this.graph_view.collapsed.clear(); cx.notify(); })}>{"按文件聚合"}</ActionButton> })}
                     <ActionButton id="graph-svg" compact onClick={cx.listener(|this, _, _, cx| this.export_graph(cx))}>{"导出 SVG"}</ActionButton>
-                    <ActionButton id="graph-changes" compact activeIf={self.graph_view.comparison} disabledIf={self.navigation_busy} onClick={cx.listener(|this, _, _, cx| this.change_graph(cx))}>{"双侧关系变化"}</ActionButton>
+                    <ActionButton id="graph-changes" compact activeIf={self.graph_view.comparison} disabledIf={self.navigation.busy} onClick={cx.listener(|this, _, _, cx| this.change_graph(cx))}>{"双侧关系变化"}</ActionButton>
                     {for (mode, label) in ["横向", "纵向", "网格"].into_iter().enumerate() { <ActionButton id={("graph-layout", mode)} compact activeIf={self.graph_view.mode == mode} onClick={cx.listener(move |this, _, _, cx| { this.graph_view.mode = mode; this.graph_view.positions.clear(); this.graph_view.positions_revision += 1; this.save_graph(cx); })}>{label}</ActionButton> }}
                     <ActionButton id="graph-save-layout" compact onClick={cx.listener(|this, _, _, cx| this.save_graph(cx))}>{"保存布局"}</ActionButton>
                     <ActionButton id="graph-search" compact disabledIf={self.search_text.trim().is_empty()} onClick={cx.listener(|this, _, _, cx| this.find_graph_node(cx))}>{"定位搜索匹配"}</ActionButton>

@@ -127,6 +127,85 @@ pub(super) fn ActionButton(
 }
 
 #[component]
+#[derive(IntoElement)]
+pub(super) struct QueryToolbar {
+    id_prefix: SharedString,
+    status: SharedString,
+    #[prop(default)]
+    busy: bool,
+    #[prop(default)]
+    has_more: bool,
+    #[prop(default)]
+    can_export: bool,
+    #[prop(default)]
+    compact: bool,
+    #[prop(callback)]
+    on_more: Rc<dyn ButtonClick>,
+    #[prop(callback)]
+    on_cancel: Rc<dyn ButtonClick>,
+    #[prop(callback)]
+    on_export: Rc<dyn ButtonClick>,
+    #[children]
+    children: Vec<gpui::AnyElement>,
+}
+
+impl RenderOnce for QueryToolbar {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        rsx! {
+            <div class="flex items-center gap-2 flex-wrap mb-2" border_color={rgb(LINE)}
+                whenClass={(!self.compact, "p-3 bg-white border rounded-xl mb-3")}>
+                {...self.children}
+                {...self.has_more.then(|| rsx! {
+                    <ActionButton id={SharedString::from(format!("{}-more", self.id_prefix))} compactIf={self.compact} disabledIf={self.busy} onClick={move |event, window, cx| (self.on_more)(event, window, cx)}>{"加载下一页"}</ActionButton>
+                })}
+                {...self.busy.then(|| rsx! {
+                    <ActionButton id={SharedString::from(format!("{}-cancel", self.id_prefix))} compactIf={self.compact} onClick={move |event, window, cx| (self.on_cancel)(event, window, cx)}>{"取消"}</ActionButton>
+                })}
+                <ActionButton id={SharedString::from(format!("{}-export", self.id_prefix))} compactIf={self.compact} disabledIf={!self.can_export} onClick={move |event, window, cx| (self.on_export)(event, window, cx)}>{"导出证据"}</ActionButton>
+                <div text_color={rgb(MUTED)} text_size={px(12.)}>{self.status}</div>
+            </div>
+        }
+    }
+}
+
+#[component]
+#[derive(IntoElement)]
+pub(super) struct EvidencePanel {
+    id: ElementId,
+    title: SharedString,
+    text: SharedString,
+    results: gpui::AnyElement,
+    results_width: f32,
+    #[prop(default)]
+    empty_label: Option<SharedString>,
+    #[prop(default)]
+    compact: bool,
+    #[prop(default)]
+    actions: Vec<gpui::AnyElement>,
+    #[children]
+    children: Vec<gpui::AnyElement>,
+}
+
+impl RenderOnce for EvidencePanel {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        rsx! {
+            <div class="flex flex-1 min-h-0 bg-white border rounded-xl overflow-hidden" border_color={rgb(LINE)}>
+                <div class="min-w-0 min-h-0 flex flex-col border-r" w={gpui::relative(self.results_width)} border_color={rgb(LINE)}>
+                    <div class="flex-1 min-h-0">{self.results}</div>
+                    {...self.empty_label.map(|label| rsx! { <EmptyState label={label} /> })}
+                </div>
+                <div id={self.id} class="flex-1 min-w-0 overflow-y-scroll p-4" whenClass={(self.compact, "p-3")}>
+                    <div font_weight={FontWeight::SEMIBOLD}>{self.title}</div>
+                    <div class="flex flex-wrap gap-2 my-3" whenClass={(self.compact, "my-2")}>{...self.actions}</div>
+                    <div font_family="Menlo" text_size={px(10.)}>{for line in self.text.lines() { <div>{line.to_owned()}</div> }}</div>
+                    {...self.children}
+                </div>
+            </div>
+        }
+    }
+}
+
+#[component]
 pub(super) fn Badge(
     label: SharedString,
     #[prop(default = MUTED)] color: u32,

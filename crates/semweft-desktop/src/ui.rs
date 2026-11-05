@@ -22,14 +22,16 @@ mod explorer;
 mod file_tree;
 mod graph_view;
 mod icons;
+mod page_state;
 #[cfg(test)]
 mod rsx_compat_tests;
 mod shell;
 use components::{
-    ActionButton, Badge, CodeText, DetailField, EmptyState, FileBadge, Icon, IconButton,
-    PanelHeader, Section, StatCard, SymbolBadge,
+    ActionButton, Badge, CodeText, DetailField, EmptyState, EvidencePanel, FileBadge, Icon,
+    IconButton, PanelHeader, QueryToolbar, Section, StatCard, SymbolBadge,
 };
 use file_tree::FileTree;
+use page_state::PageState;
 
 const INK: u32 = 0x283345;
 const MUTED: u32 = 0x8792a2;
@@ -221,11 +223,8 @@ struct Desktop {
     history: Vec<SourceTab>,
     history_position: usize,
     session: Session,
-    navigation: client::Navigation,
+    navigation: PageState<client::Navigation>,
     navigation_symbol: String,
-    navigation_busy: bool,
-    navigation_generation: u64,
-    navigation_error: String,
     references: bool,
     direction: usize,
     graph_depth: usize,
@@ -233,7 +232,6 @@ struct Desktop {
     matrix_col_offset: usize,
     client: client::Client,
     refresh_cancel: client::Cancellation,
-    navigation_cancel: client::Cancellation,
     graph_view: graph_view::GraphView,
     source_side: String,
     navigation_side: String,
@@ -251,10 +249,10 @@ struct Desktop {
 impl Drop for Desktop {
     fn drop(&mut self) {
         self.refresh_cancel.cancel();
-        self.navigation_cancel.cancel();
-        self.definition.cancellation.cancel();
-        self.analysis.cancellation.cancel();
-        self.explorer.cancellation.cancel();
+        self.navigation.cancellation.cancel();
+        self.definition.page.cancellation.cancel();
+        self.analysis.page.cancellation.cancel();
+        self.explorer.page.cancellation.cancel();
     }
 }
 
@@ -265,32 +263,6 @@ fn heading(value: impl Into<SharedString>) -> Div {
     rsx! { <div font_weight={FontWeight::SEMIBOLD}>{value.into()}</div> }
 }
 
-/// Start a new paginated request, invalidating any in-flight one.
-fn begin_page(
-    cancellation: &mut client::Cancellation,
-    generation: &mut u64,
-    seen: &mut BTreeSet<String>,
-) -> u64 {
-    cancellation.cancel();
-    *cancellation = client::Cancellation::default();
-    *generation += 1;
-    seen.clear();
-    *generation
-}
-
-/// Cancel the active paginated request and record why on the owning view.
-fn cancel_page(
-    cancellation: &mut client::Cancellation,
-    generation: &mut u64,
-    busy: &mut bool,
-    error: &mut String,
-    message: &str,
-) {
-    cancellation.cancel();
-    *generation += 1;
-    *busy = false;
-    *error = message.into();
-}
 impl Desktop {
     fn new(mut launch: Launch, data: Preview, cx: &mut Context<Self>) -> Self {
         if launch.workspace.is_none() && !data.example {
@@ -388,11 +360,8 @@ impl Desktop {
             history,
             history_position: 0,
             session,
-            navigation: client::Navigation::default(),
+            navigation: PageState::default(),
             navigation_symbol: String::new(),
-            navigation_busy: false,
-            navigation_generation: 0,
-            navigation_error: String::new(),
             references: false,
             direction: 0,
             graph_depth: 2,
@@ -400,7 +369,6 @@ impl Desktop {
             matrix_col_offset: 0,
             client,
             refresh_cancel: client::Cancellation::default(),
-            navigation_cancel: client::Cancellation::default(),
             graph_view: graph_view::GraphView::default(),
             source_side: "head".into(),
             navigation_side: "head".into(),
@@ -444,8 +412,8 @@ impl Desktop {
         }
         self.busy = true;
         self.explorer.reset();
-        self.navigation_cancel.cancel();
-        self.analysis.cancellation.cancel();
+        self.navigation.invalidate();
+        self.analysis.page.invalidate();
         self.invalidate_definition();
         self.refresh_cancel.cancel();
         self.refresh_cancel = client::Cancellation::default();
@@ -514,11 +482,8 @@ impl Desktop {
                         let previous_side = this.source_side.clone();
                         this.source_side.clear();
                         this.source_lines.clear();
-                        this.navigation_generation += 1;
-                        this.navigation_busy = false;
-                        this.navigation = client::Navigation::default();
+                        this.navigation.reset();
                         this.navigation_symbol.clear();
-                        this.navigation_error.clear();
                         this.matrix_offset = 0;
                         this.matrix_col_offset = 0;
                         this.session
@@ -1275,7 +1240,7 @@ pub fn run() -> Result<()> {
                     }
                     if let Some((symbol, navigation)) = check_navigation {
                         view.navigation_symbol = symbol;
-                        view.navigation = navigation;
+                        view.navigation.result = navigation;
                     }
                     if check_ui && view.session.bookmarks.is_empty() && !view.source_file.is_empty()
                     {
@@ -1392,12 +1357,12 @@ fn check_variants(view: Entity<Desktop>, index: usize, window: &mut Window) {
                     this.references = true;
                 }
                 4 => {
-                    this.navigation_busy = true;
+                    this.navigation.busy = true;
                 }
                 5 => {
-                    this.navigation_busy = false;
-                    this.navigation.relations.clear();
-                    this.navigation_error = "Native check: error state".into();
+                    this.navigation.busy = false;
+                    this.navigation.result.relations.clear();
+                    this.navigation.error = "Native check: error state".into();
                 }
                 6..=7 => {
                     this.page = Page::Search;
@@ -1438,9 +1403,10 @@ fn check_variants(view: Entity<Desktop>, index: usize, window: &mut Window) {
                     this.page = Page::Graph;
                     this.references = false;
                     if index == 12 {
-                        this.navigation.relations = this.data.impact.relations.clone();
+                        this.navigation.result.relations = this.data.impact.relations.clone();
                         this.navigation_symbol = this
                             .navigation
+                            .result
                             .relations
                             .first()
                             .map(|relation| relation.from.clone())

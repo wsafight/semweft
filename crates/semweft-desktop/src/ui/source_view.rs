@@ -4,15 +4,10 @@ use gpui::{HighlightStyle, StyledText};
 
 #[derive(Default)]
 pub(super) struct DefinitionState {
-    generation: u64,
+    pub(super) page: PageState<client::Definitions>,
     location: Option<(String, usize, usize)>,
     label: String,
-    busy: bool,
-    result: client::Definitions,
-    error: String,
-    pub(super) cancellation: client::Cancellation,
     query: Option<client::PositionQuery>,
-    seen: BTreeSet<String>,
 }
 
 pub(super) fn syntax_color(capture: &str) -> u32 {
@@ -30,9 +25,9 @@ pub(super) fn syntax_color(capture: &str) -> u32 {
 
 impl Desktop {
     pub(super) fn invalidate_definition(&mut self) {
-        self.definition.cancellation.cancel();
+        self.definition.page.reset();
         self.definition = DefinitionState {
-            generation: self.definition.generation + 1,
+            page: std::mem::take(&mut self.definition.page),
             ..Default::default()
         };
     }
@@ -77,7 +72,7 @@ impl Desktop {
         {
             Ok(hash) => hash,
             Err(error) => {
-                self.definition.error = error.to_string();
+                self.definition.page.error = error.to_string();
                 cx.notify();
                 return;
             }
@@ -101,29 +96,27 @@ impl Desktop {
             return;
         };
         let append = cursor.is_some();
-        let generation = self.definition.generation;
-        self.definition.busy = true;
+        let generation = self.definition.page.start();
         let client = self.client.clone();
-        let cancellation = self.definition.cancellation.clone();
+        let cancellation = self.definition.page.cancellation.clone();
         let task = cx
             .background_executor()
             .spawn(async move { client.definitions_page(&query, cursor, &cancellation) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                if this.definition.generation != generation {
+                if !this.definition.page.finish(generation) {
                     return;
                 }
-                this.definition.busy = false;
                 match result {
                     Ok(result) => {
                         if append {
-                            this.definition.result.append(result);
+                            this.definition.page.result.append(result);
                         } else {
-                            this.definition.result = result;
+                            this.definition.page.result = result;
                         }
                     }
-                    Err(error) => this.definition.error = format!("定义查询失败：{error:#}"),
+                    Err(error) => this.definition.page.error = format!("定义查询失败：{error:#}"),
                 }
                 cx.notify();
             });
@@ -133,25 +126,28 @@ impl Desktop {
     }
 
     fn more_definitions(&mut self, cx: &mut Context<Self>) {
-        if self.definition.busy {
+        if self.definition.page.busy {
             return;
         }
-        let Some(cursor) = self.definition.result.output["continuation"]["next_cursor"]
+        let Some(cursor) = self.definition.page.result.output["continuation"]["next_cursor"]
             .as_str()
             .map(str::to_owned)
         else {
             return;
         };
-        if !self.definition.seen.insert(cursor.clone()) {
-            self.definition.error = "重复分页游标，请重新查询".into();
+        let Some(cursor) = self
+            .definition
+            .page
+            .next_cursor(Some(cursor), "重复分页游标，请重新查询")
+        else {
             cx.notify();
             return;
-        }
+        };
         self.fetch_definitions(Some(cursor), cx);
     }
 
     fn jump_to_definition(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(candidate) = self.definition.result.symbols.get(index) else {
+        let Some(candidate) = self.definition.page.result.symbols.get(index) else {
             return;
         };
         let location = candidate.symbol.location.clone();
@@ -168,7 +164,7 @@ impl Desktop {
     }
 
     fn source_definition_row(&self, index: usize, cx: &Context<Self>) -> gpui::AnyElement {
-        let candidate = &self.definition.result.symbols[index];
+        let candidate = &self.definition.page.result.symbols[index];
         rsx! {
             <div class="w-full min-w-0 h-[102px] px-4 py-3 border-b flex flex-col justify-center" border_color={rgb(LINE)}>
                 <div class="flex items-center gap-2">
@@ -195,31 +191,32 @@ impl Desktop {
         let state = &self.definition;
         let candidates = uniform_list(
             "definition-candidates",
-            state.result.symbols.len(),
+            state.page.result.symbols.len(),
             cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
                 range
                     .map(|index| this.source_definition_row(index, cx))
                     .collect::<Vec<_>>()
             }),
         );
-        let empty = !state.busy && state.error.is_empty() && state.result.symbols.is_empty();
+        let empty =
+            !state.page.busy && state.page.error.is_empty() && state.page.result.symbols.is_empty();
         rsx! {
             <div class="h-[220px] flex-shrink-0 flex flex-col bg-white border-t" border_color={rgb(LINE)}>
                 <div class="flex items-center justify-between px-4 py-2 border-b" border_color={rgb(LINE)}>
                     <div class="min-w-0">
-                        {heading(format!("{} · 定义与候选 {}", state.label, state.result.symbols.len()))}
+                        {heading(format!("{} · 定义与候选 {}", state.label, state.page.result.symbols.len()))}
                         <div base={muted(format!("{file}:{line}:{column} · 候选来自名称匹配，请核查同名与绑定"))} class="mt-1" text_size={px(10.)} />
                     </div>
                     <ActionButton id="close-definitions" compact onClick={cx.listener(|this, _, _, cx| { this.invalidate_definition(); cx.notify(); })}>{"收起"}</ActionButton>
                 </div>
                 <div class="flex flex-col flex-1 min-h-0"
-                    when={(state.busy, |panel| panel.child(rsx! { <EmptyState label="正在查询当前位置…" /> }))}
-                    when={(empty, |panel| panel.child(rsx! { <EmptyState label={if state.result.occurrence.is_null() { "当前位置没有捕获的符号或引用。" } else { "已捕获此引用，但没有解析到定义；这不表示定义不存在。" }} /> }))}>
-                    {...(!state.error.is_empty()).then(|| rsx! { <EmptyState warning label={state.error.clone()} /> })}
+                    when={(state.page.busy, |panel| panel.child(rsx! { <EmptyState label="正在查询当前位置…" /> }))}
+                    when={(empty, |panel| panel.child(rsx! { <EmptyState label={if state.page.result.occurrence.is_null() { "当前位置没有捕获的符号或引用。" } else { "已捕获此引用，但没有解析到定义；这不表示定义不存在。" }} /> }))}>
+                    {...(!state.page.error.is_empty()).then(|| rsx! { <EmptyState warning label={state.page.error.clone()} /> })}
                     <div base={candidates} class="flex-1 min-h-0" />
-                    {...state.result.output["continuation"]["next_cursor"].is_string().then(|| rsx! { <ActionButton id="definition-more" disabledIf={state.busy} onClick={cx.listener(|this, _, _, cx| this.more_definitions(cx))}>{"加载更多定义候选"}</ActionButton> })}
-                    {...(state.result.output["truncated"].as_bool().unwrap_or(false) && !state.result.output["continuation"]["next_cursor"].is_string()).then(|| rsx! { <EmptyState warning label="定义分析范围已截断，请使用更精确的位置继续核查。" /> })}
-                    {...(state.result.completeness["known_gaps"].as_array().is_some_and(|gaps| !gaps.is_empty()) && !empty).then(|| rsx! {
+                    {...state.page.result.output["continuation"]["next_cursor"].is_string().then(|| rsx! { <ActionButton id="definition-more" disabledIf={state.page.busy} onClick={cx.listener(|this, _, _, cx| this.more_definitions(cx))}>{"加载更多定义候选"}</ActionButton> })}
+                    {...(state.page.result.output["truncated"].as_bool().unwrap_or(false) && !state.page.result.output["continuation"]["next_cursor"].is_string()).then(|| rsx! { <EmptyState warning label="定义分析范围已截断，请使用更精确的位置继续核查。" /> })}
+                    {...(state.page.result.completeness["known_gaps"].as_array().is_some_and(|gaps| !gaps.is_empty()) && !empty).then(|| rsx! {
                         <div base={muted("当前分析存在缺口；可在变更审查中查看范围与说明。")} class="px-4 py-2" text_size={px(10.)} />
                     })}
                 </div>
@@ -228,9 +225,10 @@ impl Desktop {
     }
 
     pub(super) fn source_pane(&self, cx: &Context<Self>) -> gpui::AnyElement {
-        let bookmarked = self.session.bookmarks.iter().any(|b| {
-            b.matches_location(&self.source_file, self.source_line, &self.source_side)
-        });
+        let bookmarked =
+            self.session.bookmarks.iter().any(|b| {
+                b.matches_location(&self.source_file, self.source_line, &self.source_side)
+            });
         let source_symbol = self.source_symbol().cloned();
         let code = uniform_list("full-source-lines", self.source_code.lines.len(), cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
             range.map(|index| {
@@ -344,19 +342,20 @@ pub(super) fn check_source_navigation(
                 });
             }
             1 => {
-                if view.read(cx).definition.busy {
+                if view.read(cx).definition.page.busy {
                     assert!(retries < 3600, "Definition query did not finish");
                     check_source_navigation(view, step, retries + 1, window);
                     return;
                 }
                 let state = &view.read(cx).definition;
-                assert!(state.error.is_empty(), "{}", state.error);
+                assert!(state.page.error.is_empty(), "{}", state.page.error);
                 assert!(
-                    !state.result.symbols.is_empty(),
+                    !state.page.result.symbols.is_empty(),
                     "Missing definition candidates"
                 );
                 assert!(
                     state
+                        .page
                         .result
                         .symbols
                         .iter()

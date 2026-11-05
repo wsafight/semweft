@@ -200,13 +200,8 @@ impl Desktop {
         side: String,
         cx: &mut Context<Self>,
     ) {
-        self.navigation_cancel.cancel();
-        self.navigation_cancel = client::Cancellation::default();
-        self.navigation_generation += 1;
-        let generation = self.navigation_generation;
-        self.navigation_busy = true;
-        self.navigation_error.clear();
-        self.navigation = client::Navigation::default();
+        self.navigation.reset();
+        let generation = self.navigation.begin();
         self.reset_graph();
         self.navigation_symbol = symbol.clone();
         self.navigation_side = side;
@@ -238,7 +233,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) {
         let client = self.client.clone();
-        let cancellation = self.navigation_cancel.clone();
+        let cancellation = self.navigation.cancellation.clone();
         let append = cursor.is_some();
         let task = cx
             .background_executor()
@@ -246,31 +241,31 @@ impl Desktop {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                if generation != this.navigation_generation {
+                if !this.navigation.finish(generation) {
                     return;
                 }
-                this.navigation_busy = false;
                 match result {
                     Ok(data) => {
                         if append {
-                            this.navigation.relations.extend(data.relations);
+                            this.navigation.result.relations.extend(data.relations);
                             let mut ids = this
                                 .navigation
+                                .result
                                 .nodes
                                 .iter()
                                 .map(|node| node.symbol_id.clone())
                                 .collect::<BTreeSet<_>>();
-                            this.navigation.nodes.extend(
+                            this.navigation.result.nodes.extend(
                                 data.nodes
                                     .into_iter()
                                     .filter(|node| ids.insert(node.symbol_id.clone())),
                             );
-                            this.navigation.output = data.output;
+                            this.navigation.result.output = data.output;
                         } else {
-                            this.navigation = data;
+                            this.navigation.result = data;
                         }
                     }
-                    Err(e) => this.navigation_error = format!("查询失败：{e:#}"),
+                    Err(e) => this.navigation.error = format!("查询失败：{e:#}"),
                 }
                 cx.notify();
             });
@@ -280,16 +275,20 @@ impl Desktop {
     }
 
     fn more_navigation(&mut self, cx: &mut Context<Self>) {
-        if self.navigation_busy {
+        if self.navigation.busy {
             return;
         }
-        let cursor = self.navigation.output["continuation"]["next_cursor"]
+        let cursor = self.navigation.result.output["continuation"]["next_cursor"]
             .as_str()
             .map(str::to_owned);
-        if cursor.is_none() {
+        let Some(cursor) = self
+            .navigation
+            .next_cursor(cursor, "重复分页游标，请重新查询")
+        else {
+            cx.notify();
             return;
-        }
-        self.navigation_busy = true;
+        };
+        let generation = self.navigation.start();
         let query = client::Query {
             symbol: self.navigation_symbol.clone(),
             snapshot: self
@@ -304,7 +303,7 @@ impl Desktop {
             depth: self.graph_depth,
             references: self.references,
         };
-        self.fetch_navigation(query, cursor, self.navigation_generation, cx);
+        self.fetch_navigation(query, Some(cursor), generation, cx);
     }
 
     pub(super) fn files(&self, cx: &Context<Self>) -> gpui::AnyElement {
@@ -428,16 +427,16 @@ impl Desktop {
             .source_symbol()
             .or_else(|| self.data.symbols.symbols.get(self.selected))
             .cloned();
-        let has_more = self.navigation.output["continuation"]["next_cursor"].is_string();
-        let truncated = self.navigation.output["truncated"]
+        let has_more = self.navigation.result.output["continuation"]["next_cursor"].is_string();
+        let truncated = self.navigation.result.output["truncated"]
             .as_bool()
             .unwrap_or(false);
-        let relations = uniform_list("graph-relations", self.navigation.relations.len(), cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+        let relations = uniform_list("graph-relations", self.navigation.result.relations.len(), cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
             range.map(|index| {
-                let relation = &this.navigation.relations[index];
+                let relation = &this.navigation.result.relations[index];
                 rsx! {
                     <div id={("nav-relation", index)} class="h-[44px] px-3 border-b cursor-pointer flex gap-2 items-center bg-white" border_color={rgb(LINE)} hoverClass="bg-[#f3f6fa]"
-                        onClick={cx.listener(move |this, _, _, cx| { let location = this.navigation.relations[index].location.clone(); let side = this.navigation_side.clone(); if this.data.verify_location_on(&location, &side).is_ok() { this.open_side(location.file, location.line, &side, true, cx); this.page = Page::Files; } else { this.message = "关联位置与捕获源码不一致".into(); cx.notify(); } })}>
+                        onClick={cx.listener(move |this, _, _, cx| { let location = this.navigation.result.relations[index].location.clone(); let side = this.navigation_side.clone(); if this.data.verify_location_on(&location, &side).is_ok() { this.open_side(location.file, location.line, &side, true, cx); this.page = Page::Files; } else { this.message = "关联位置与捕获源码不一致".into(); cx.notify(); } })}>
                         <Badge label={relation.kind.clone()} color={GREEN} background={MINT} />
                         <div class="flex-1 min-w-0 truncate" text_size={px(11.)}>{format!("{} → {} · {}:{}", relation.from_name, relation.to_name, relation.location.file, relation.location.line)}</div>
                         <Badge label={format!("{} · {}", relation.certainty, relation.freshness)} color={AMBER} background={0xfbf4dfu32} />
@@ -453,12 +452,12 @@ impl Desktop {
                     {...(!self.references).then(|| rsx! { <ActionButton id="graph-direction" onClick={cx.listener(|this, _, _, cx| { this.direction = (this.direction + 1) % 3; if !this.navigation_symbol.is_empty() { this.load_side_navigation(this.navigation_symbol.clone(), false, this.navigation_side.clone(), cx); } else { cx.notify(); } })}>{["双向", "调用方", "被调用方"][self.direction]}</ActionButton> })}
                     {...(!self.references).then(|| rsx! { <ActionButton id="graph-depth" onClick={cx.listener(|this, _, _, cx| { this.graph_depth = this.graph_depth % 5 + 1; if !this.navigation_symbol.is_empty() { this.load_side_navigation(this.navigation_symbol.clone(), false, this.navigation_side.clone(), cx); } else { cx.notify(); } })}>{format!("深度 {}", self.graph_depth)}</ActionButton> })}
                     {...initial.map(|s| rsx! { <ActionButton id="graph-current" active onClick={cx.listener(move |this, _, _, cx| this.load_navigation(s.symbol_id.clone(), this.references, cx))}>{"分析当前符号"}</ActionButton> })}
-                    {...self.navigation.output["continuation"]["next_cursor"].is_string().then(|| rsx! { <ActionButton id="graph-more" disabledIf={self.navigation_busy} onClick={cx.listener(|this, _, _, cx| this.more_navigation(cx))}>{"加载下一页"}</ActionButton> })}
-                    {...self.navigation_busy.then(|| rsx! { <ActionButton id="graph-cancel" onClick={cx.listener(|this, _, _, cx| { cancel_page(&mut this.navigation_cancel, &mut this.navigation_generation, &mut this.navigation_busy, &mut this.navigation_error, "查询已取消，保留已加载结果"); this.navigation_cancel = client::Cancellation::default(); cx.notify(); })}>{"取消查询"}</ActionButton> })}
-                    {...self.navigation_busy.then(|| muted("正在查询固定快照…"))}
+                    {...self.navigation.result.output["continuation"]["next_cursor"].is_string().then(|| rsx! { <ActionButton id="graph-more" disabledIf={self.navigation.busy} onClick={cx.listener(|this, _, _, cx| this.more_navigation(cx))}>{"加载下一页"}</ActionButton> })}
+                    {...self.navigation.busy.then(|| rsx! { <ActionButton id="graph-cancel" onClick={cx.listener(|this, _, _, cx| { this.navigation.cancel("查询已取消，保留已加载结果"); cx.notify(); })}>{"取消查询"}</ActionButton> })}
+                    {...self.navigation.busy.then(|| muted("正在查询固定快照…"))}
                 </div>
-                {...(!self.navigation_error.is_empty()).then(|| rsx! { <div base={muted(self.navigation_error.clone())} class="mb-3" text_color={rgb(AMBER)} /> })}
-                <div base={muted(format!("已加载 {} 条关联 · {}", self.navigation.relations.len(), if has_more { "还有分页，可继续加载" } else if truncated { "分析范围已截断，请核查覆盖范围" } else { "当前查询分页完成" }))} class="mb-2" />
+                {...(!self.navigation.error.is_empty()).then(|| rsx! { <div base={muted(self.navigation.error.clone())} class="mb-3" text_color={rgb(AMBER)} /> })}
+                <div base={muted(format!("已加载 {} 条关联 · {}", self.navigation.result.relations.len(), if has_more { "还有分页，可继续加载" } else if truncated { "分析范围已截断，请核查覆盖范围" } else { "当前查询分页完成" }))} class="mb-2" />
                 {self.graph_canvas(cx)}
                 <div class="h-[150px] flex-shrink-0 mt-2 border rounded-lg overflow-hidden" border_color={rgb(LINE)}>{relations}</div>
             </div>
