@@ -544,3 +544,300 @@ mod fact_cache_tests {
         assert_eq!(parser.files_extracted, 0);
     }
 }
+
+#[cfg(test)]
+mod extraction_tests {
+    use super::*;
+
+    fn manifest(files: &[(&str, &str)]) -> Manifest {
+        Manifest {
+            workspace_id: "web-extraction".into(),
+            files: files
+                .iter()
+                .map(|(path, content)| ((*path).into(), SourceFile::new(*content)))
+                .collect(),
+            binary_files: BTreeMap::new(),
+            analysis_versions: BTreeMap::new(),
+            scope: "test".into(),
+        }
+    }
+
+    fn analyze(files: &[(&str, &str)]) -> SyntaxFacts {
+        WebParser::new().unwrap().analyze(&manifest(files)).unwrap()
+    }
+
+    fn symbol<'a>(facts: &'a SyntaxFacts, name: &str) -> &'a Symbol {
+        facts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == name)
+            .unwrap_or_else(|| panic!("missing symbol {name}: {:#?}", facts.symbols))
+    }
+
+    #[test]
+    fn source_extensions_and_grammar_selection_cover_the_web_set() {
+        for path in [
+            "a.ts", "a.tsx", "a.js", "a.jsx", "a.mjs", "a.cjs", "a.mts", "a.cts",
+        ] {
+            assert!(is_source(path), "{path} is a web source");
+        }
+        for path in ["a.json", "a.rs", "a.go", "a.css", "a"] {
+            assert!(!is_source(path), "{path} is not a web source");
+        }
+        assert_eq!(
+            language("view.tsx"),
+            tree_sitter_typescript::LANGUAGE_TSX.into()
+        );
+        for path in ["a.ts", "a.mts", "a.cts"] {
+            assert_eq!(
+                language(path),
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+            );
+        }
+        for path in ["a.js", "a.jsx", "a.mjs", "a.cjs"] {
+            assert_eq!(language(path), tree_sitter_javascript::LANGUAGE.into());
+        }
+    }
+
+    #[test]
+    fn imports_cover_static_exports_require_and_dynamic_import() {
+        let facts = analyze(&[(
+            "src/index.js",
+            "import value from './value';\nexport { x } from './x';\nconst c = require('./cjs');\nconst d = import('./dynamic');\n",
+        )]);
+        let imports = &facts.imports["src/index.js"];
+        for expected in ["./value", "./x", "./cjs", "./dynamic"] {
+            assert!(
+                imports.contains(&expected.to_string()),
+                "missing {expected}: {imports:?}"
+            );
+        }
+        assert!(
+            !facts
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "dynamic_module_specifier"),
+            "{:?}",
+            facts.diagnostics
+        );
+    }
+
+    #[test]
+    fn non_literal_dynamic_imports_record_a_gap() {
+        let facts = analyze(&[(
+            "src/dynamic.js",
+            "export function load(name) { return import(name); }\n",
+        )]);
+        assert!(
+            facts
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "dynamic_module_specifier"),
+            "{:?}",
+            facts.diagnostics
+        );
+        assert!(!facts.imports.contains_key("src/dynamic.js"));
+    }
+
+    #[test]
+    fn declarations_map_web_constructs_to_stable_kinds() {
+        let facts = analyze(&[(
+            "src/kinds.ts",
+            "export function send(n: number) { return n; }\nfunction helper() {}\nexport class Shop { price = 1; buy() { return this.price; } }\nexport interface Store { value: number; }\nexport type ID = string;\nexport enum Kind { A }\nconst value = 1;\nconst arrow = (x: number) => x;\n",
+        )]);
+        assert_eq!(symbol(&facts, "send").kind, "function");
+        assert_eq!(symbol(&facts, "helper").kind, "function");
+        assert_eq!(symbol(&facts, "Shop").kind, "struct");
+        assert_eq!(symbol(&facts, "price").kind, "field");
+        assert_eq!(symbol(&facts, "buy").kind, "function");
+        assert_eq!(symbol(&facts, "Store").kind, "trait");
+        assert!(
+            facts
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "value" && symbol.kind == "field"),
+            "interface properties are fields: {:?}",
+            facts.symbols
+        );
+        assert_eq!(symbol(&facts, "ID").kind, "type");
+        assert_eq!(symbol(&facts, "Kind").kind, "enum");
+        assert_eq!(
+            facts
+                .symbols
+                .iter()
+                .find(|symbol| symbol.kind == "static" && symbol.name == "value")
+                .map(|symbol| symbol.name.as_str()),
+            Some("value")
+        );
+        assert_eq!(symbol(&facts, "arrow").kind, "function");
+        assert_eq!(
+            facts.declarations[&symbol(&facts, "Shop").symbol_id].visibility,
+            "public"
+        );
+        assert_eq!(
+            facts.declarations[&symbol(&facts, "helper").symbol_id].visibility,
+            "private"
+        );
+    }
+
+    #[test]
+    fn test_scope_follows_directory_and_filename_markers() {
+        let facts = analyze(&[
+            ("test/api.test.ts", "export function first() {}\n"),
+            ("src/app.spec.js", "export function second() {}\n"),
+            ("src/app.ts", "export function third() {}\n"),
+            ("__tests__/helper.js", "export function fourth() {}\n"),
+        ]);
+        for (name, expected) in [
+            ("first", true),
+            ("second", true),
+            ("third", false),
+            ("fourth", true),
+        ] {
+            assert_eq!(
+                facts.declarations[&symbol(&facts, name).symbol_id].test_only,
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn jsdoc_is_detached_from_documented_declarations() {
+        let facts = analyze(&[(
+            "src/docs.ts",
+            "export function undocumented() {}\n/**\n * Send docs.\n * Second line.\n */\nexport function send() {}\n",
+        )]);
+        let docs = &facts.declarations[&symbol(&facts, "send").symbol_id].docs;
+        assert!(docs.contains("Send docs."), "{docs:?}");
+        assert!(docs.contains("Second line."), "{docs:?}");
+        assert_eq!(
+            facts.declarations[&symbol(&facts, "undocumented").symbol_id].docs,
+            ""
+        );
+    }
+
+    #[test]
+    fn call_sites_keep_direct_method_and_constructor_kinds() {
+        let facts = analyze(&[(
+            "src/calls.js",
+            "function target() {}\nclass A { method() {} }\nfunction caller() { target(); new A().method(); new A(); }\n",
+        )]);
+        let target = facts
+            .calls
+            .iter()
+            .find(|call| call.expression == "target")
+            .unwrap();
+        assert_eq!(target.kind, CallKind::Direct);
+        assert!(target.caller_id.is_some());
+        let method = facts
+            .calls
+            .iter()
+            .find(|call| call.expression.ends_with(".method"))
+            .unwrap();
+        assert_eq!(method.kind, CallKind::Method);
+        assert!(
+            facts
+                .calls
+                .iter()
+                .any(|call| call.expression == "A" && call.kind == CallKind::Direct),
+            "constructors are calls: {:?}",
+            facts.calls
+        );
+    }
+
+    #[test]
+    fn callbacks_owned_by_expressions_record_a_gap() {
+        let facts = analyze(&[(
+            "src/callbacks.js",
+            "function outer() { const f = (x) => x; items.forEach((x) => inner(x)); }\n",
+        )]);
+        assert!(
+            facts
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "callback_invocation_not_modeled"),
+            "{:?}",
+            facts.diagnostics
+        );
+    }
+
+    #[test]
+    fn occurrences_distinguish_reads_writes_calls_and_types() {
+        let facts = analyze(&[(
+            "src/occurrences.ts",
+            "type Meter = number;\nlet count: Meter = 0;\nfunction target(): void {}\nfunction run() { count = 1; target(); }\n",
+        )]);
+        let kinds = |name: &str| {
+            facts
+                .occurrences
+                .iter()
+                .filter(|occurrence| occurrence.name == name)
+                .map(|occurrence| occurrence.kind.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert!(kinds("count").contains(&"write"), "{:?}", kinds("count"));
+        assert!(kinds("target").contains(&"call"), "{:?}", kinds("target"));
+        assert!(kinds("Meter").contains(&"type"), "{:?}", kinds("Meter"));
+    }
+
+    #[test]
+    fn tsx_jsx_is_parsed_with_the_tsx_grammar() {
+        let facts = analyze(&[(
+            "src/view.tsx",
+            "export function View({ value }: { value: number }) {\n  return <div className=\"box\">{value}</div>;\n}\n",
+        )]);
+        assert!(
+            !facts
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "parse_error"),
+            "{:?}",
+            facts.diagnostics
+        );
+        assert_eq!(symbol(&facts, "View").kind, "function");
+    }
+
+    #[test]
+    fn parse_errors_are_reported_with_the_web_file() {
+        let facts = analyze(&[("src/broken.ts", "export function broken( {")]);
+        let parse_errors = facts
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "parse_error")
+            .collect::<Vec<_>>();
+        assert!(!parse_errors.is_empty(), "{:?}", facts.diagnostics);
+        assert!(
+            parse_errors
+                .iter()
+                .all(|diagnostic| diagnostic.file.as_deref() == Some("src/broken.ts"))
+        );
+    }
+
+    #[test]
+    fn analysis_is_deterministic_across_file_insertion_orders() {
+        let forward = analyze(&[
+            ("src/b.js", "export function b() { a(); }\n"),
+            ("src/a.js", "export function a() {}\n"),
+        ]);
+        let reverse = analyze(&[
+            ("src/a.js", "export function a() {}\n"),
+            ("src/b.js", "export function b() { a(); }\n"),
+        ]);
+        assert_eq!(forward.symbols, reverse.symbols);
+        assert_eq!(forward.calls, reverse.calls);
+        assert_eq!(forward.occurrences, reverse.occurrences);
+        assert_eq!(forward.diagnostics, reverse.diagnostics);
+    }
+
+    #[test]
+    fn non_web_files_are_ignored_without_extraction_work() {
+        let mut parser = WebParser::new().unwrap();
+        let facts = parser
+            .analyze(&manifest(&[("src/lib.rs", "pub fn entry() {}\n")]))
+            .unwrap();
+        assert_eq!(parser.files_extracted, 0);
+        assert!(facts.symbols.is_empty());
+        assert!(facts.imports.is_empty());
+    }
+}

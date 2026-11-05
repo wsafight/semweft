@@ -305,3 +305,177 @@ pub(crate) fn report(
     result["findings"] = json!(findings);
     Ok(())
 }
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    fn layer(name: &str, paths: &[&str], allow: &[&str]) -> Layer {
+        Layer {
+            name: name.into(),
+            paths: paths.iter().map(|path| (*path).into()).collect(),
+            allow: allow.iter().map(|name| (*name).into()).collect(),
+        }
+    }
+
+    #[test]
+    fn valid_policies_accept_glob_paths_and_known_layers() {
+        let policy = Policy {
+            layers: vec![
+                layer("core", &["crates/core/**"], &[]),
+                layer("ui", &["src/ui/**", "src/*.rs"], &["core"]),
+            ],
+            deny_unassigned: true,
+        };
+        policy.validate().unwrap();
+        let digest = policy.digest().unwrap();
+        assert!(digest.starts_with("arch_rules_"));
+        assert_eq!(policy.digest().unwrap(), digest);
+
+        let mut changed = policy.clone();
+        changed.deny_unassigned = false;
+        assert_ne!(changed.digest().unwrap(), digest);
+
+        Policy::default().validate().unwrap();
+    }
+
+    #[test]
+    fn policies_reject_incoherent_layer_definitions() {
+        let cases = [
+            Policy {
+                layers: vec![],
+                deny_unassigned: true,
+            },
+            Policy {
+                layers: vec![layer("", &["src/**"], &[]), layer("ui", &["ui/**"], &[])],
+                deny_unassigned: false,
+            },
+            Policy {
+                layers: vec![layer("ui", &["src/**"], &[]), layer("ui", &["ui/**"], &[])],
+                deny_unassigned: false,
+            },
+            Policy {
+                layers: vec![layer("ui", &[], &[])],
+                deny_unassigned: false,
+            },
+            Policy {
+                layers: vec![layer("ui", &["src/**"], &["missing"])],
+                deny_unassigned: false,
+            },
+        ];
+        for policy in cases {
+            let error = policy.validate().unwrap_err();
+            assert_eq!(
+                semweft_protocol::error_value(&error)["error"]["code"],
+                "invalid_argument",
+                "{policy:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn policies_reject_escaping_or_invalid_globs() {
+        for path in ["/absolute/**", "../outside/**", "", "a/../b"] {
+            let policy = Policy {
+                layers: vec![layer("ui", &[path], &[])],
+                deny_unassigned: false,
+            };
+            assert!(policy.validate().is_err(), "{path}");
+        }
+        let policy = Policy {
+            layers: vec![layer("ui", &["["], &[])],
+            deny_unassigned: false,
+        };
+        assert!(policy.validate().is_err(), "invalid glob syntax");
+    }
+
+    fn report() -> Value {
+        json!({
+            "architecture": {
+                "analysis_complete": true,
+                "policy": {"layers": [{"name": "ui", "paths": ["src/ui/**"]}]},
+                "rules_digest": "rules",
+            },
+            "findings": [
+                {"fingerprint": "a"},
+                {"fingerprint": "b"},
+                {"fingerprint": "a"},
+                {"other": true},
+            ],
+            "snapshot_id": "snap",
+            "epochs": {"semantic": 4},
+            "output": {"continuation": {}},
+        })
+    }
+
+    #[test]
+    fn baselines_capture_distinct_fingerprints_and_version_bindings() {
+        let snapshot = baseline(&report()).unwrap();
+        assert_eq!(snapshot.schema_version, "0.1");
+        assert_eq!(snapshot.rules_digest, "rules");
+        assert_eq!(snapshot.snapshot_id, "snap");
+        assert_eq!(snapshot.semantic_epoch, 4);
+        assert_eq!(
+            snapshot.fingerprints,
+            BTreeSet::from(["a".to_string(), "b".to_string()])
+        );
+
+        let mut missing_epoch = report();
+        missing_epoch["epochs"] = json!({});
+        assert_eq!(baseline(&missing_epoch).unwrap().semantic_epoch, 0);
+    }
+
+    #[test]
+    fn baselines_require_complete_collected_traversals_and_bindings() {
+        let mut cases = vec![];
+        let mut incomplete = report();
+        incomplete["architecture"]["analysis_complete"] = json!(false);
+        cases.push(incomplete);
+        let mut no_layers = report();
+        no_layers["architecture"]["policy"]["layers"] = json!([]);
+        cases.push(no_layers);
+        let mut continued = report();
+        continued["output"]["continuation"]["next_cursor"] = json!("page-2");
+        cases.push(continued);
+        let mut no_rules = report();
+        no_rules["architecture"]["rules_digest"] = Value::Null;
+        cases.push(no_rules);
+        let mut no_snapshot = report();
+        no_snapshot["snapshot_id"] = Value::Null;
+        cases.push(no_snapshot);
+        for report in cases {
+            let error = baseline(&report).unwrap_err();
+            assert_eq!(
+                semweft_protocol::error_value(&error)["error"]["code"],
+                "invalid_argument"
+            );
+        }
+    }
+
+    #[test]
+    fn policies_and_baselines_reject_unknown_fields() {
+        let policy: Result<Policy, _> = serde_json::from_value(json!({
+            "layers": [],
+            "unknown": true,
+        }));
+        assert!(policy.is_err());
+        let baseline: Result<Baseline, _> = serde_json::from_value(json!({
+            "schema_version": "0.1",
+            "rules_digest": "d",
+            "fingerprints": [],
+            "snapshot_id": "s",
+            "semantic_epoch": 0,
+            "unknown": true,
+        }));
+        assert!(baseline.is_err());
+        let decoded: Baseline = serde_json::from_value(json!({
+            "schema_version": "0.1",
+            "rules_digest": "d",
+            "fingerprints": ["f"],
+            "snapshot_id": "s",
+            "semantic_epoch": 2,
+        }))
+        .unwrap();
+        assert_eq!(decoded.fingerprints, BTreeSet::from(["f".to_string()]));
+    }
+}

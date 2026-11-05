@@ -856,3 +856,322 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn protocol_constants_stay_stable() {
+        assert_eq!(DAEMON_PROTOCOL, "0.1");
+        assert_eq!(MIN_BUDGET, 4096);
+        assert_eq!(TOOL_NAMES.len(), 19);
+        assert_eq!(
+            TOOL_NAMES
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            TOOL_NAMES.len(),
+            "tool names are unique"
+        );
+    }
+
+    #[test]
+    fn structured_query_errors_keep_their_code_and_details() {
+        let error = failure("symbol_not_found", "missing", json!({"symbol": "x"}));
+        let value = error_value(&error);
+        assert_eq!(value["schema_version"], "0.1");
+        assert_eq!(value["error"]["code"], "symbol_not_found");
+        assert_eq!(value["error"]["message"], "missing");
+        assert_eq!(value["error"]["details"]["symbol"], "x");
+    }
+
+    #[test]
+    fn plain_errors_map_through_known_codes_or_internal_error() {
+        for (message, expected) in [
+            ("timeout: too slow", "timeout"),
+            ("invalid_argument: bad", "invalid_argument"),
+            ("daemon_incompatible: version", "daemon_incompatible"),
+            ("cancelled: stopped", "cancelled"),
+            ("something_else: bad", "internal_error"),
+            ("no prefix", "internal_error"),
+        ] {
+            let value = error_value(&anyhow::anyhow!(message));
+            assert_eq!(value["error"]["code"], expected, "{message}");
+            assert_eq!(value["error"]["message"], message);
+            assert!(value["error"].get("details").is_none());
+        }
+    }
+
+    #[test]
+    fn request_and_endpoint_envelopes_round_trip() {
+        let request: DaemonRequest = serde_json::from_value(json!({
+            "protocol": "0.1",
+            "workspace_id": "ws",
+            "config_hash": "hash",
+            "method": "search_symbols",
+            "args": {"query": "x"},
+        }))
+        .unwrap();
+        assert_eq!(request.request_id, None);
+        assert_eq!(request.args["query"], "x");
+        let encoded = serde_json::to_value(DaemonRequest {
+            request_id: Some("desktop-1".into()),
+            ..request
+        })
+        .unwrap();
+        assert_eq!(encoded["request_id"], "desktop-1");
+        assert_eq!(encoded["protocol"], "0.1");
+
+        let endpoint = DesktopEndpoint {
+            protocol: DAEMON_PROTOCOL.into(),
+            workspace: PathBuf::from("/workspace"),
+            workspace_id: "ws".into(),
+            config_hash: "hash".into(),
+            endpoint: "/tmp/socket".into(),
+        };
+        let decoded: DesktopEndpoint =
+            serde_json::from_value(serde_json::to_value(&endpoint).unwrap()).unwrap();
+        assert_eq!(decoded.protocol, DAEMON_PROTOCOL);
+        assert_eq!(decoded.workspace, PathBuf::from("/workspace"));
+        assert_eq!(decoded.endpoint, "/tmp/socket");
+    }
+
+    #[test]
+    fn tool_schemas_share_pagination_and_add_tool_specific_parameters() {
+        let capabilities = tool_schema("capabilities");
+        assert!(
+            capabilities["properties"].get("snapshot_id").is_none(),
+            "capabilities need no snapshot"
+        );
+        assert!(capabilities["properties"].get("timeout_ms").is_some());
+
+        let status = tool_schema("index_status");
+        assert!(status["properties"].get("snapshot_id").is_some());
+        assert!(status["properties"].get("semantic_epoch").is_none());
+        assert!(status["properties"].get("limit").is_none());
+
+        let search = tool_schema("search_symbols");
+        assert_eq!(search["required"], json!([]));
+        assert_eq!(search["anyOf"][1]["required"], json!(["query"]));
+        assert_eq!(search["properties"]["match"]["default"], "fuzzy");
+        assert_eq!(
+            search["properties"]["api_scope"]["enum"],
+            json!(["declarations", "external"])
+        );
+        assert_eq!(
+            search["properties"]["visibility"]["enum"],
+            json!(["public", "restricted", "private", "all"])
+        );
+        assert_eq!(search["additionalProperties"], false);
+
+        let review = tool_schema("get_review_result");
+        assert_eq!(review["anyOf"][1]["required"], json!(["review_id"]));
+
+        let symbol = tool_schema("get_symbol");
+        assert_eq!(symbol["anyOf"][1]["required"], json!(["symbol"]));
+        assert_eq!(symbol["properties"]["include_body"]["default"], false);
+        assert_eq!(symbol["properties"]["include_docs"]["default"], true);
+
+        let paths = tool_schema("find_paths");
+        assert_eq!(paths["anyOf"][0]["required"], json!(["cursor"]));
+        assert_eq!(paths["properties"]["max_paths"]["maximum"], 1000);
+        assert_eq!(paths["properties"]["max_nodes"]["maximum"], 100000);
+    }
+
+    #[test]
+    fn validate_rejects_unknown_tools_and_unknown_parameters() {
+        let error = validate("no_such_tool", &json!({})).unwrap_err();
+        assert_eq!(
+            error_value(&error)["error"]["code"],
+            "capability_unsupported"
+        );
+        let error = validate("capabilities", &json!({"unknown": true})).unwrap_err();
+        assert_eq!(error_value(&error)["error"]["code"], "invalid_argument");
+        assert!(validate("capabilities", &json!({})).is_ok());
+        assert!(validate("capabilities", &json!({"timeout_ms": 1})).is_ok());
+        assert!(validate("capabilities", &json!({"timeout_ms": 0})).is_err());
+        assert!(validate("capabilities", &json!({"timeout_ms": 60001})).is_err());
+    }
+
+    #[test]
+    fn cursor_requests_skip_tool_specific_requirements() {
+        assert!(validate("get_symbol", &json!({"cursor": "next"})).is_ok());
+        assert!(validate("find_paths", &json!({"cursor": "next"})).is_ok());
+        assert!(validate("search_symbols", &json!({"cursor": "next"})).is_ok());
+        assert!(validate("find_paths", &json!({"from": "a"})).is_err());
+        assert!(validate("search_symbols", &json!({})).is_err());
+        // Cursor-only requests still enforce the common parameter types.
+        assert!(validate("find_paths", &json!({"cursor": "", "limit": 0})).is_err());
+        assert!(validate("find_paths", &json!({"cursor": "x", "timeout_ms": 60001})).is_err());
+    }
+
+    #[test]
+    fn validation_enforces_cross_field_relationships() {
+        assert!(validate("index_status", &json!({"semantic_epoch": 0})).is_err());
+        assert!(validate("index_status", &json!({"snapshot_id": "s"})).is_ok());
+        assert!(
+            validate(
+                "index_status",
+                &json!({"snapshot_id": "s", "semantic_epoch": 0})
+            )
+            .is_err(),
+            "index_status has no semantic epoch parameter"
+        );
+        assert!(
+            validate(
+                "search_symbols",
+                &json!({"query": "x", "timeout_ms": 1000, "fresh_wait_ms": 500})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                "search_symbols",
+                &json!({"query": "x", "timeout_ms": 1000, "fresh_wait_ms": 501})
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                "search_symbols",
+                &json!({"query": "x", "path_prefix": "../x"})
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                "search_symbols",
+                &json!({"query": "x", "path_prefix": "/abs"})
+            )
+            .is_err()
+        );
+        assert!(validate("search_symbols", &json!({"query": "x", "path_prefix": "."})).is_ok());
+    }
+
+    #[test]
+    fn repo_map_and_api_scope_validations_catch_incoherent_filters() {
+        assert!(
+            validate(
+                "repo_map",
+                &json!({"snapshot_id": "s", "cycles": true, "dependencies": "none"})
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                "repo_map",
+                &json!({"snapshot_id": "s", "cycles": true, "dependencies": "crate"})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                "search_symbols",
+                &json!({"query": "x", "api_scope": "external", "visibility": "private"})
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                "search_symbols",
+                &json!({"query": "x", "api_scope": "external", "visibility": "all"})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                "search_symbols",
+                &json!({"query": "x", "api_scope": "declarations", "visibility": "private"})
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn context_pack_requires_budget_and_exactly_one_of_symbol_and_task() {
+        let base = json!({"snapshot_id": "s", "budget": 20000});
+        assert!(validate("context_pack", &json!({"snapshot_id": "s", "symbol": "x"})).is_err());
+        assert!(
+            validate(
+                "context_pack",
+                &json!({"snapshot_id": "s", "budget": 20000, "symbol": "x"})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                "context_pack",
+                &json!({"snapshot_id": "s", "budget": 20000, "task": "x"})
+            )
+            .is_ok()
+        );
+        assert!(validate("context_pack", &base).is_err());
+        assert!(
+            validate(
+                "context_pack",
+                &json!({"snapshot_id": "s", "budget": 20000, "symbol": "x", "task": "y"})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn stale_history_parameters_must_be_paired_and_requested() {
+        assert!(validate("find_references", &json!({"symbol": "x"})).is_ok());
+        assert!(
+            validate(
+                "find_references",
+                &json!({"symbol": "x", "include_stale": true, "stale_from": {"snapshot_id": "s", "semantic_epoch": 0}})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                "find_references",
+                &json!({"symbol": "x", "include_stale": true})
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                "find_references",
+                &json!({"symbol": "x", "stale_from": {"snapshot_id": "s", "semantic_epoch": 0}})
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                "find_references",
+                &json!({"symbol": "x", "freshness": ["stale"], "include_stale": true, "stale_from": {"snapshot_id": "s", "semantic_epoch": 0}})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                "find_references",
+                &json!({"symbol": "x", "freshness": ["stale"]})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn safe_relative_accepts_normalized_paths_and_rejects_traversal() {
+        assert_eq!(
+            safe_relative("src/lib.rs").unwrap(),
+            PathBuf::from("src/lib.rs")
+        );
+        assert_eq!(safe_relative("a").unwrap(), PathBuf::from("a"));
+        assert_eq!(safe_relative("a/b/c").unwrap(), PathBuf::from("a/b/c"));
+        assert_eq!(safe_relative("a//b").unwrap(), PathBuf::from("a//b"));
+        for path in ["", ".", "..", "./a", "../a", "a/../b", "/abs"] {
+            let error = safe_relative(path).unwrap_err();
+            assert_eq!(
+                error_value(&error)["error"]["code"],
+                "invalid_argument",
+                "{path}"
+            );
+        }
+    }
+}

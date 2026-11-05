@@ -8,3 +8,6 @@ publish.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 semweft-core.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

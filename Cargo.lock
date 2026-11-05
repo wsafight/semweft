@@ -1379,6 +1379,7 @@ dependencies = [
  "anyhow",
  "semweft-core",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

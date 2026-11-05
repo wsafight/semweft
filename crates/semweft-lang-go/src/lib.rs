@@ -397,3 +397,241 @@ mod fact_cache_tests {
         assert_eq!(parser.files_extracted, 0);
     }
 }
+
+#[cfg(test)]
+mod extraction_tests {
+    use super::*;
+
+    fn manifest(files: &[(&str, &str)]) -> Manifest {
+        Manifest {
+            workspace_id: "go-extraction".into(),
+            files: files
+                .iter()
+                .map(|(path, content)| ((*path).into(), SourceFile::new(*content)))
+                .collect(),
+            binary_files: BTreeMap::new(),
+            analysis_versions: BTreeMap::new(),
+            scope: "test".into(),
+        }
+    }
+
+    fn analyze(files: &[(&str, &str)]) -> SyntaxFacts {
+        GoParser::new().unwrap().analyze(&manifest(files)).unwrap()
+    }
+
+    fn symbol<'a>(facts: &'a SyntaxFacts, name: &str) -> &'a Symbol {
+        facts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == name)
+            .unwrap_or_else(|| panic!("missing symbol {name}: {:#?}", facts.symbols))
+    }
+
+    #[test]
+    fn imports_cover_grouped_and_aliased_specs() {
+        let facts = analyze(&[(
+            "main.go",
+            "package main\nimport (\n\t\"fmt\"\n\talias \"example.com/pkg\"\n)\nfunc main() { fmt.Println() }\n",
+        )]);
+        let imports = &facts.imports["main.go"];
+        assert!(imports.contains(&"fmt".to_string()), "{imports:?}");
+        assert!(
+            imports.contains(&"example.com/pkg".to_string()),
+            "{imports:?}"
+        );
+        assert!(facts.diagnostics.is_empty(), "{:?}", facts.diagnostics);
+    }
+
+    #[test]
+    fn declarations_map_go_constructs_to_stable_kinds() {
+        let facts = analyze(&[(
+            "kinds.go",
+            "package kinds\n// Reader docs.\ntype Reader interface { Read() error }\ntype Alias = int\ntype Stock struct { Value int }\nconst Pi = 3\nvar Global int\nfunc (s *Stock) Count() int { return s.Value }\nfunc helper() {}\n",
+        )]);
+        assert_eq!(symbol(&facts, "Reader").kind, "trait");
+        assert_eq!(symbol(&facts, "Read").kind, "trait_method");
+        assert_eq!(symbol(&facts, "Alias").kind, "type");
+        assert_eq!(symbol(&facts, "Stock").kind, "struct");
+        assert_eq!(symbol(&facts, "Value").kind, "field");
+        assert_eq!(symbol(&facts, "Pi").kind, "const");
+        assert_eq!(symbol(&facts, "Global").kind, "static");
+        assert_eq!(symbol(&facts, "Count").kind, "function");
+        assert_eq!(symbol(&facts, "helper").kind, "function");
+        assert_eq!(
+            symbol(&facts, "Count").qualified_name,
+            "kinds.go::Stock::Count"
+        );
+        assert_eq!(
+            facts.declarations[&symbol(&facts, "Reader").symbol_id].docs,
+            "Reader docs."
+        );
+    }
+
+    #[test]
+    fn visibility_and_test_scope_follow_names_and_paths() {
+        let facts = analyze(&[
+            (
+                "pkg/main.go",
+                "package pkg\nfunc Exported() {}\nfunc internal() {}\n",
+            ),
+            ("pkg/main_test.go", "package pkg\nfunc TestThing() {}\n"),
+        ]);
+        let exported = symbol(&facts, "Exported");
+        let internal = symbol(&facts, "internal");
+        let test = symbol(&facts, "TestThing");
+        assert_eq!(facts.declarations[&exported.symbol_id].visibility, "public");
+        assert_eq!(
+            facts.declarations[&internal.symbol_id].visibility,
+            "private"
+        );
+        assert!(!facts.declarations[&exported.symbol_id].test_only);
+        assert!(facts.declarations[&test.symbol_id].test_only);
+    }
+
+    #[test]
+    fn call_sites_keep_direct_method_and_indirect_kinds() {
+        let facts = analyze(&[(
+            "calls.go",
+            "package calls\ntype Stock struct{}\nfunc (s Stock) Count() int { return 0 }\nfunc target() {}\nfunc indirect() func() { return target }\nfunc caller() { target(); var s Stock; s.Count(); indirect()(); }\n",
+        )]);
+        let direct = facts
+            .calls
+            .iter()
+            .find(|call| call.expression == "target" && call.caller_id.is_some())
+            .unwrap();
+        assert_eq!(direct.kind, CallKind::Direct);
+        let method = facts
+            .calls
+            .iter()
+            .find(|call| call.expression == "s.Count")
+            .unwrap();
+        assert_eq!(method.kind, CallKind::Method);
+        let indirect = facts
+            .calls
+            .iter()
+            .find(|call| call.kind == CallKind::Indirect)
+            .unwrap();
+        assert_eq!(indirect.expression, "indirect()");
+    }
+
+    #[test]
+    fn function_literals_record_a_gap_and_clear_the_caller() {
+        let facts = analyze(&[(
+            "closures.go",
+            "package closures\nfunc target() {}\nfunc caller() { f := func() { target() }; f() }\n",
+        )]);
+        assert!(
+            facts
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "closure_owner_not_modeled"),
+            "{:?}",
+            facts.diagnostics
+        );
+        let inner = facts
+            .calls
+            .iter()
+            .find(|call| call.expression == "target")
+            .unwrap();
+        assert_eq!(inner.caller_id, None, "closures have no modeled owner");
+        let outer = facts
+            .calls
+            .iter()
+            .find(|call| call.expression == "f")
+            .unwrap();
+        assert!(outer.caller_id.is_some());
+    }
+
+    #[test]
+    fn occurrences_distinguish_reads_writes_calls_and_types() {
+        let facts = analyze(&[(
+            "occurrences.go",
+            "package occurrences\nimport \"fmt\"\ntype T struct{}\nfunc f(x int) {\n\ty := x\n\ty = 2\n\tfmt.Println(y)\n}\n",
+        )]);
+        let kinds = |name: &str| {
+            facts
+                .occurrences
+                .iter()
+                .filter(|occurrence| occurrence.name == name)
+                .map(|occurrence| occurrence.kind.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds("y").iter().filter(|kind| **kind == "write").count(),
+            2
+        );
+        assert!(kinds("Println").contains(&"call"), "{:?}", kinds("Println"));
+        assert!(
+            facts
+                .occurrences
+                .iter()
+                .any(|occurrence| occurrence.name == "int" && occurrence.kind == "type"),
+            "{:?}",
+            facts.occurrences
+        );
+        let caller = symbol(&facts, "f").symbol_id.clone();
+        assert!(
+            facts
+                .occurrences
+                .iter()
+                .filter(|occurrence| occurrence.enclosing_symbol_id.is_some())
+                .all(|occurrence| occurrence.enclosing_symbol_id.as_deref() == Some(&caller))
+        );
+    }
+
+    #[test]
+    fn parse_errors_are_reported_with_the_go_file() {
+        let facts = analyze(&[("broken.go", "package broken\nfunc f( {\n")]);
+        let parse_errors = facts
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "parse_error")
+            .collect::<Vec<_>>();
+        assert!(!parse_errors.is_empty(), "{:?}", facts.diagnostics);
+        assert!(
+            parse_errors
+                .iter()
+                .all(|diagnostic| diagnostic.file.as_deref() == Some("broken.go"))
+        );
+    }
+
+    #[test]
+    fn analysis_is_deterministic_across_file_insertion_orders() {
+        let forward = analyze(&[
+            ("b.go", "package p\nfunc B() { a() }\n"),
+            ("a.go", "package p\nfunc a() {}\n"),
+        ]);
+        let reverse = analyze(&[
+            ("a.go", "package p\nfunc a() {}\n"),
+            ("b.go", "package p\nfunc B() { a() }\n"),
+        ]);
+        assert_eq!(forward.symbols, reverse.symbols);
+        assert_eq!(forward.calls, reverse.calls);
+        assert_eq!(forward.occurrences, reverse.occurrences);
+        assert_eq!(forward.diagnostics, reverse.diagnostics);
+        assert!(
+            forward
+                .symbols
+                .windows(2)
+                .all(|pair| pair[0].symbol_id <= pair[1].symbol_id)
+        );
+        assert!(
+            forward
+                .calls
+                .windows(2)
+                .all(|pair| pair[0].callsite_id <= pair[1].callsite_id)
+        );
+    }
+
+    #[test]
+    fn non_go_files_are_ignored_without_extraction_work() {
+        let mut parser = GoParser::new().unwrap();
+        let facts = parser
+            .analyze(&manifest(&[("lib.rs", "pub fn entry() {}\n")]))
+            .unwrap();
+        assert_eq!(parser.files_extracted, 0);
+        assert!(facts.symbols.is_empty());
+        assert!(facts.calls.is_empty());
+        assert!(facts.diagnostics.is_empty());
+    }
+}
