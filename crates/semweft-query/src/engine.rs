@@ -287,7 +287,7 @@ pub struct State {
     query_views: QueryViews,
     store: SnapshotStore,
     dirty_extra: BTreeSet<String>,
-    capture_diagnostics: Option<(String, Vec<Diagnostic>)>,
+    capture_diagnostics: Option<(String, Arc<[Diagnostic]>)>,
     deriver: Arc<Mutex<RelationDeriver>>,
 }
 
@@ -648,7 +648,7 @@ impl Engine {
                     .as_ref()
                     .is_some_and(|(snapshot, diagnostics)| {
                         snapshot == &previous.snapshot.snapshot_id
-                            && diagnostics == &captured.diagnostics
+                            && diagnostics.as_ref() == captured.diagnostics.as_slice()
                     })
         });
         let syntax = if reusable.is_none() {
@@ -699,7 +699,7 @@ impl Engine {
             .map(|v| v.snapshot.snapshot_id.clone());
         let semantic_base = state.coordinator.latest_current();
         let view = if let Some(mut syntax) = syntax {
-            syntax.diagnostics.extend(captured.diagnostics.clone());
+            syntax.diagnostics.extend(captured.diagnostics.iter().cloned());
             if !trusted {
                 syntax.diagnostics.push(Diagnostic { code:"semantic_untrusted".into(), file:None, message:"Resident semantic tool execution is blocked; verified imported evidence remains queryable. Authorize execution with semweft trust --accept-build-execution".into() });
             }
@@ -716,7 +716,10 @@ impl Engine {
                 })
                 .unwrap_or_else(|| reusable.unwrap())
         };
-        state.capture_diagnostics = Some((view.snapshot.snapshot_id.clone(), captured.diagnostics));
+        state.capture_diagnostics = Some((
+            view.snapshot.snapshot_id.clone(),
+            Arc::from(captured.diagnostics),
+        ));
         let changed = previous.as_deref() != Some(&view.snapshot.snapshot_id);
         if changed {
             state.refresh_error = None;
@@ -1132,6 +1135,15 @@ impl Engine {
         })();
         self.state.locked().store = store;
         result
+    }
+
+    /// The latest published snapshot without refreshing or loading anything.
+    pub fn latest_snapshot(&self) -> Option<(String, u64)> {
+        let state = self.state.locked();
+        state
+            .coordinator
+            .latest()
+            .map(|view| (view.snapshot.snapshot_id.clone(), view.epochs.semantic_epoch))
     }
 
     pub fn status(&self, args: &Value) -> Result<Value> {

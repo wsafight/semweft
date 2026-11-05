@@ -8,8 +8,7 @@ use std::{
 };
 
 #[derive(PartialEq, Eq)]
-struct LayoutKey {
-    view: String,
+struct LayoutKey {    view: String,
     side: String,
     root: String,
     file: String,
@@ -37,6 +36,9 @@ pub(super) struct GraphView {
     minimap_origin: Rc<Cell<(f32, f32)>>,
     search_index: usize,
     layout: RefCell<Option<(LayoutKey, Rc<Diagram>)>>,
+    placed: RefCell<Option<(usize, usize, u64, Rc<Diagram>)>>,
+    positions_revision: u64,
+    comparison_pairs: Option<(String, BTreeSet<(String, String)>, BTreeSet<(String, String)>)>,
 }
 
 impl Default for GraphView {
@@ -57,8 +59,44 @@ impl Default for GraphView {
             minimap_origin: Rc::new(Cell::new((0., 0.))),
             search_index: 0,
             layout: RefCell::default(),
+            placed: RefCell::default(),
+            positions_revision: 0,
+            comparison_pairs: None,
         }
     }
+}
+
+impl LayoutKey {
+    /// Compare against the live state without cloning strings or the collapsed set.
+    fn matches(&self, desktop: &Desktop) -> bool {
+        self.view == desktop.data.review_key
+            && self.side == desktop.navigation_side
+            && self.root == desktop.navigation_symbol
+            && self.file == desktop.source_file
+            && self.relations == desktop.navigation.relations.len()
+            && self.nodes == desktop.navigation.nodes.len()
+            && self.dependencies == desktop.graph_view.dependencies
+            && self.comparison == desktop.graph_view.comparison
+            && self.grouped == desktop.graph_view.grouped
+            && self.collapsed == desktop.graph_view.collapsed
+    }
+}
+
+fn comparison_pairs(raw: &Value) -> (BTreeSet<(String, String)>, BTreeSet<(String, String)>) {
+    let pairs = |field: &str| {
+        raw["impact"]["relation_changes"][field]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|relation| {
+                Some((
+                    relation["from"].as_str()?.to_owned(),
+                    relation["to"].as_str()?.to_owned(),
+                ))
+            })
+            .collect::<BTreeSet<_>>()
+    };
+    (pairs("added"), pairs("removed"))
 }
 
 impl Desktop {
@@ -98,6 +136,7 @@ impl Desktop {
             self.graph_view.collapsed = layout.collapsed.clone();
             self.graph_view.grouped = layout.grouped;
             self.graph_view.mode = layout.mode.min(2);
+            self.graph_view.positions_revision += 1;
         }
     }
 
@@ -129,12 +168,27 @@ impl Desktop {
 
     fn placed_diagram(&self) -> Rc<Diagram> {
         let base = self.diagram();
-        if self.graph_view.mode == 0 && self.graph_view.positions.is_empty() {
-            return base;
+        let mode = self.graph_view.mode;
+        let revision = self.graph_view.positions_revision;
+        let pointer = Rc::as_ptr(&base) as usize;
+        if let Some((cached_pointer, cached_mode, cached_revision, placed)) =
+            self.graph_view.placed.borrow().as_ref()
+            && *cached_pointer == pointer
+            && *cached_mode == mode
+            && *cached_revision == revision
+        {
+            return placed.clone();
         }
-        let mut diagram = (*base).clone();
-        diagram.arrange(self.graph_view.mode, &self.graph_view.positions);
-        Rc::new(diagram)
+        let placed = if mode == 0 && self.graph_view.positions.is_empty() {
+            base
+        } else {
+            let mut diagram = (*base).clone();
+            diagram.arrange(mode, &self.graph_view.positions);
+            Rc::new(diagram)
+        };
+        *self.graph_view.placed.borrow_mut() =
+            Some((pointer, mode, revision, placed.clone()));
+        placed
     }
 
     fn change_graph(&mut self, cx: &mut Context<Self>) {
@@ -144,6 +198,13 @@ impl Desktop {
         let removed: Vec<crate::model::Relation> =
             serde_json::from_value(self.data.raw["impact"]["relation_changes"]["removed"].clone())
                 .unwrap_or_default();
+        let pairs = |relations: &[crate::model::Relation]| {
+            relations
+                .iter()
+                .map(|relation| (relation.from.clone(), relation.to.clone()))
+                .collect::<BTreeSet<_>>()
+        };
+        let comparison_pairs = (pairs(&added), pairs(&removed));
         let mut relations = self.data.impact.relations.clone();
         relations.extend(added);
         relations.extend(removed);
@@ -159,6 +220,11 @@ impl Desktop {
         } else {
             relations[0].from.clone()
         };
+        let referenced = relations
+            .iter()
+            .flat_map(|relation| [&relation.from, &relation.to])
+            .cloned()
+            .collect::<BTreeSet<_>>();
         self.navigation_cancel.cancel();
         self.navigation_generation += 1;
         self.navigation_busy = false;
@@ -169,11 +235,17 @@ impl Desktop {
             .symbols
             .iter()
             .chain(&self.data.base_symbols.symbols)
+            .filter(|symbol| referenced.contains(symbol.symbol_id.as_str()))
             .cloned()
             .collect();
         self.navigation_symbol = root;
         self.graph_view = GraphView {
             comparison: true,
+            comparison_pairs: Some((
+                self.data.review_key.clone(),
+                comparison_pairs.0,
+                comparison_pairs.1,
+            )),
             ..Default::default()
         };
         self.restore_graph();
@@ -229,6 +301,11 @@ impl Desktop {
         </div> }.into_any_element()
     }
     fn diagram(&self) -> Rc<Diagram> {
+        if let Some((previous, diagram)) = self.graph_view.layout.borrow().as_ref()
+            && previous.matches(self)
+        {
+            return diagram.clone();
+        }
         let key = LayoutKey {
             view: self.data.review_key.clone(),
             side: self.navigation_side.clone(),
@@ -241,11 +318,6 @@ impl Desktop {
             grouped: self.graph_view.grouped,
             collapsed: self.graph_view.collapsed.clone(),
         };
-        if let Some((previous, diagram)) = self.graph_view.layout.borrow().as_ref()
-            && previous == &key
-        {
-            return diagram.clone();
-        }
         let diagram = if self.graph_view.dependencies {
             let edges = self.data.dependency_edges();
             let symbols = edges
@@ -301,21 +373,14 @@ impl Desktop {
         };
         let mut diagram = diagram;
         if self.graph_view.comparison && !self.graph_view.grouped {
-            let pairs = |field: &str| {
-                self.data.raw["impact"]["relation_changes"][field]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|relation| {
-                        Some((
-                            relation["from"].as_str()?.to_owned(),
-                            relation["to"].as_str()?.to_owned(),
-                        ))
-                    })
-                    .collect::<BTreeSet<_>>()
+            let fallback;
+            let (added, removed) = match &self.graph_view.comparison_pairs {
+                Some((key, added, removed)) if key == &self.data.review_key => (added, removed),
+                _ => {
+                    fallback = comparison_pairs(&self.data.raw);
+                    (&fallback.0, &fallback.1)
+                }
             };
-            let added = pairs("added");
-            let removed = pairs("removed");
             for edge in &mut diagram.edges {
                 let pair = (
                     diagram.nodes[edge.from].id.clone(),
@@ -388,11 +453,17 @@ impl Desktop {
                     self.graph_view
                         .positions
                         .insert(node.id.clone(), (430., 280.));
+                    self.graph_view.positions_revision += 1;
                     let placed = self.placed_diagram();
                     assert_eq!(placed.nodes[0].x, 430.);
                 }
             }
-            _ => self.graph_view.comparison = true,
+            _ => {
+                self.graph_view.comparison = true;
+                let (added, removed) = comparison_pairs(&self.data.raw);
+                self.graph_view.comparison_pairs =
+                    Some((self.data.review_key.clone(), added, removed));
+            }
         }
     }
 
@@ -497,11 +568,11 @@ impl Desktop {
                     <ActionButton id="graph-zoom-out" compact onClick={cx.listener(|this, _, _, cx| { this.graph_view.zoom = (this.graph_view.zoom / 1.2).max(0.35); cx.notify(); })}>{"−"}</ActionButton>
                     {muted(format!("{:.0}%", zoom * 100.))}
                     <ActionButton id="graph-zoom-in" compact onClick={cx.listener(|this, _, _, cx| { this.graph_view.zoom = (this.graph_view.zoom * 1.2).min(2.); cx.notify(); })}>{"＋"}</ActionButton>
-                    <ActionButton id="graph-reset" compact onClick={cx.listener(|this, _, _, cx| { this.graph_view.zoom = 1.; this.graph_view.pan = (0., 0.); this.graph_view.collapsed.clear(); this.graph_view.positions.clear(); this.save_graph(cx); })}>{"重置"}</ActionButton>
+                    <ActionButton id="graph-reset" compact onClick={cx.listener(|this, _, _, cx| { this.graph_view.zoom = 1.; this.graph_view.pan = (0., 0.); this.graph_view.collapsed.clear(); this.graph_view.positions.clear(); this.graph_view.positions_revision += 1; this.save_graph(cx); })}>{"重置"}</ActionButton>
                     {...(!self.graph_view.dependencies).then(|| rsx! { <ActionButton id="graph-group" compact activeIf={self.graph_view.grouped} onClick={cx.listener(|this, _, _, cx| { this.graph_view.grouped = !this.graph_view.grouped; this.graph_view.collapsed.clear(); cx.notify(); })}>{"按文件聚合"}</ActionButton> })}
                     <ActionButton id="graph-svg" compact onClick={cx.listener(|this, _, _, cx| this.export_graph(cx))}>{"导出 SVG"}</ActionButton>
                     <ActionButton id="graph-changes" compact activeIf={self.graph_view.comparison} disabledIf={self.navigation_busy} onClick={cx.listener(|this, _, _, cx| this.change_graph(cx))}>{"双侧关系变化"}</ActionButton>
-                    {for (mode, label) in ["横向", "纵向", "网格"].into_iter().enumerate() { <ActionButton id={("graph-layout", mode)} compact activeIf={self.graph_view.mode == mode} onClick={cx.listener(move |this, _, _, cx| { this.graph_view.mode = mode; this.graph_view.positions.clear(); this.save_graph(cx); })}>{label}</ActionButton> }}
+                    {for (mode, label) in ["横向", "纵向", "网格"].into_iter().enumerate() { <ActionButton id={("graph-layout", mode)} compact activeIf={self.graph_view.mode == mode} onClick={cx.listener(move |this, _, _, cx| { this.graph_view.mode = mode; this.graph_view.positions.clear(); this.graph_view.positions_revision += 1; this.save_graph(cx); })}>{label}</ActionButton> }}
                     <ActionButton id="graph-save-layout" compact onClick={cx.listener(|this, _, _, cx| this.save_graph(cx))}>{"保存布局"}</ActionButton>
                     <ActionButton id="graph-search" compact disabledIf={self.search_text.trim().is_empty()} onClick={cx.listener(|this, _, _, cx| this.find_graph_node(cx))}>{"定位搜索匹配"}</ActionButton>
                     <ActionButton id="graph-fit" compact onClick={cx.listener(|this, _, _, cx| { let diagram = this.placed_diagram(); let (width, height) = diagram.size(); let viewport = this.graph_view.viewport.get(); this.graph_view.zoom = ((viewport.0 - 32.) / width).min((viewport.1 - 32.) / height).clamp(0.1, 2.); this.graph_view.pan = (16., 16.); cx.notify(); })}>{"适应窗口"}</ActionButton>
@@ -513,7 +584,7 @@ impl Desktop {
                     onMouseUp={(MouseButton::Left, cx.listener(|this, _, _, cx| { this.graph_view.drag = None; if this.graph_view.node_drag.take().is_some() { this.save_graph(cx); } }))}
                     onMouseMove={cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
                         if let Some((id, start, origin)) = &this.graph_view.node_drag {
-                            if event.dragging() { this.graph_view.positions.insert(id.clone(), ((origin.0 + f32::from(event.position.x - start.x) / this.graph_view.zoom).clamp(0., 1_000_000.), (origin.1 + f32::from(event.position.y - start.y) / this.graph_view.zoom).clamp(0., 1_000_000.))); cx.notify(); }
+                            if event.dragging() { this.graph_view.positions.insert(id.clone(), ((origin.0 + f32::from(event.position.x - start.x) / this.graph_view.zoom).clamp(0., 1_000_000.), (origin.1 + f32::from(event.position.y - start.y) / this.graph_view.zoom).clamp(0., 1_000_000.))); this.graph_view.positions_revision += 1; cx.notify(); }
                             else { this.graph_view.node_drag = None; }
                             return;
                         }

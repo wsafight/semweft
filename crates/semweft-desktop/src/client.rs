@@ -395,7 +395,11 @@ impl Client {
         let context = if report.is_some() {
             json!({"churn":{},"churn_scope":"审查固定版本未采集 Git 热点"})
         } else {
-            self.call("__desktop_context", json!({}), cancellation)?
+            self.call(
+                "__desktop_context",
+                json!({"timeout_ms": 20000}),
+                cancellation,
+            )?
         };
         let mut impact_error = None;
         cancellation.stage("4/6 正在分析变更影响…")?;

@@ -286,7 +286,7 @@ fn apply_events(record: &mut Value, entries: Vec<Value>) {
     record["events"] = json!(entries);
 }
 
-pub(crate) fn get(resolved: &config::Resolved, stored: &StoredView, id: &str) -> Result<Value> {
+fn load(resolved: &config::Resolved, id: &str) -> Result<Value> {
     if !id.starts_with("review_")
         || !id
             .chars()
@@ -313,6 +313,45 @@ pub(crate) fn get(resolved: &config::Resolved, stored: &StoredView, id: &str) ->
     {
         bail!("invalid_argument: review identity or workspace mismatch");
     }
+    Ok(record)
+}
+
+/// Cheap wake-up signal for waiters: revision and coarse state, without a scan.
+pub fn status(
+    resolved: &config::Resolved,
+    engine: &crate::Engine,
+    id: &str,
+) -> Result<Value> {
+    let record = load(resolved, id)?;
+    let entries = if record["kind"] == "request" {
+        events(resolved, &record)?
+    } else {
+        vec![]
+    };
+    let revision = entries.len();
+    let conclusion = entries
+        .last()
+        .filter(|event| event["item_id"] == "overall")
+        .and_then(|event| event["conclusion"].as_str())
+        .unwrap_or("pending");
+    let snapshot_matches = engine.latest_snapshot().is_some_and(|(snapshot, epoch)| {
+        record["snapshot_id"] == json!(snapshot) && record["epochs"]["semantic"] == json!(epoch)
+    });
+    let state = if !snapshot_matches {
+        "superseded"
+    } else {
+        match conclusion {
+            "approve" => "approved",
+            "reject" => "changes_requested",
+            _ if revision == 0 => "pending",
+            _ => "in_review",
+        }
+    };
+    Ok(json!({"schema_version":"0.1","review_id":id,"revision":revision,"state":state,"conclusion":conclusion}))
+}
+
+pub(crate) fn get(resolved: &config::Resolved, stored: &StoredView, id: &str) -> Result<Value> {
+    let mut record = load(resolved, id)?;
     let current_versions = verify::rules()
         .as_array()
         .into_iter()

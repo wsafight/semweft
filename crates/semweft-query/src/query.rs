@@ -1286,11 +1286,12 @@ pub fn filtered(relations: Vec<Relation>, args: &Value) -> Vec<Relation> {
         .collect()
 }
 fn filter_relation(mut r: Relation, args: &Value) -> Option<Relation> {
-    if !relation_matches(&r, args) {
-        return None;
-    }
     if let Some(sources) = args["source"].as_array() {
-        r.evidence.retain(|e| sources.contains(&json!(e.source)));
+        r.evidence.retain(|e| {
+            sources
+                .iter()
+                .any(|source| source.as_str() == Some(e.source.as_str()))
+        });
         if r.evidence.is_empty() {
             return None;
         }
@@ -1308,38 +1309,51 @@ fn filter_relation(mut r: Relation, args: &Value) -> Option<Relation> {
             Certainty::Candidate
         };
     }
-    Some(r)
+    relation_matches(&r, args).then_some(r)
+}
+
+/// Whether the relation is definite and its effective freshness after the
+/// `source` filter; `None` when no evidence survives.
+fn effective_filter<'a>(relation: &'a Relation, sources: &[Value]) -> Option<(bool, &'a str)> {
+    let mut definite = false;
+    let mut freshness = relation.freshness.as_str();
+    let mut count = 0;
+    let mut only_syntax = true;
+    for evidence in &relation.evidence {
+        if !sources
+            .iter()
+            .any(|source| source.as_str() == Some(evidence.source.as_str()))
+        {
+            continue;
+        }
+        count += 1;
+        only_syntax &= evidence.source == "L1";
+        definite |= evidence.certainty == Certainty::Definite;
+    }
+    if count == 0 {
+        return None;
+    }
+    if relation.origin.is_some() {
+        if only_syntax {
+            freshness = "current";
+        } else {
+            definite = false;
+        }
+    }
+    Some((definite, freshness))
 }
 
 fn relation_matches(relation: &Relation, args: &Value) -> bool {
     if !prefix(&relation.file, args) {
         return false;
     }
-    let mut definite = relation.certainty == Certainty::Definite;
-    let mut freshness = relation.freshness.as_str();
-    if let Some(sources) = args["source"].as_array() {
-        let evidence = relation.evidence.iter().filter(|evidence| {
-            sources
-                .iter()
-                .any(|source| source.as_str() == Some(evidence.source.as_str()))
-        });
-        let mut count = 0;
-        let mut only_syntax = true;
-        definite = false;
-        for evidence in evidence {
-            count += 1;
-            only_syntax &= evidence.source == "L1";
-            definite |= evidence.certainty == Certainty::Definite;
-        }
-        if count == 0 {
-            return false;
-        }
-        if relation.origin.is_some() && only_syntax {
-            freshness = "current";
-        } else if relation.origin.is_some() {
-            definite = false;
-        }
-    }
+    let (definite, freshness) = match args["source"].as_array() {
+        Some(sources) => match effective_filter(relation, sources) {
+            Some(value) => value,
+            None => return false,
+        },
+        None => (relation.certainty == Certainty::Definite, relation.freshness.as_str()),
+    };
     let certainty = if definite { "definite" } else { "candidate" };
     !args["certainty"]
         .as_array()

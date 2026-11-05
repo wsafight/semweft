@@ -588,8 +588,9 @@ fn handle(
             }
             "__snapshots" => service.engine.snapshots(&request.args),
             "__desktop_sources" => crate::desktop::sources(&service, &request.args),
-            "__desktop_context" => crate::desktop::context(resolved),
+            "__desktop_context" => crate::desktop::context(resolved, deadline),
             "__desktop_review" => crate::desktop::review(resolved, &request.args),
+            "__review_status" => crate::desktop::review_status(&service, resolved, &request.args),
             "__review_request" => {
                 crate::desktop::review_request(&service, resolved, &request.args, deadline)
             }

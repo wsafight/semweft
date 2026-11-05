@@ -22,13 +22,13 @@ pub fn bootstrap(resolved: &Resolved) -> Result<Value> {
     })?)
 }
 
-pub fn context(resolved: &Resolved) -> Result<Value> {
+pub fn context(resolved: &Resolved, deadline: std::time::Instant) -> Result<Value> {
     let selected = git::diff_selectors(&resolved.root, "WORKTREE");
     let mut result = match selected {
         Ok(diff) => json!({"diff":diff,"churn":{}}),
         Err(error) => json!({"diff":null,"churn":{},"git_error":format!("{error:#}")}),
     };
-    let history = git_output(
+    let history = git::output(
         &resolved.root,
         &[
             "log",
@@ -43,55 +43,18 @@ pub fn context(resolved: &Resolved) -> Result<Value> {
             "--",
             ".",
         ],
+        deadline,
     );
     match history {
         Ok(history) => result["churn"] = churn(&history),
         Err(error) => result["git_error"] = json!(format!("{error:#}")),
     }
-    result["branch"] = git_output(&resolved.root, &["branch", "--show-current"])
+    result["branch"] = git::output(&resolved.root, &["branch", "--show-current"], deadline)
         .ok()
         .filter(|name| !name.trim().is_empty())
         .map(|name| json!(name.trim()))
         .unwrap_or(Value::Null);
     Ok(result)
-}
-
-fn git_output(root: &std::path::Path, args: &[&str]) -> Result<String> {
-    use std::io::{Read, Seek};
-    let mut stdout = tempfile::tempfile()?;
-    let mut stderr = tempfile::tempfile()?;
-    let mut child = std::process::Command::new("git")
-        .current_dir(root)
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-        ])
-        .args(args)
-        .stdout(stdout.try_clone()?)
-        .stderr(stderr.try_clone()?)
-        .spawn()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            anyhow::bail!("Git history timed out after 20 seconds");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    };
-    stdout.rewind()?;
-    stderr.rewind()?;
-    let mut errors = String::new();
-    stderr.read_to_string(&mut errors)?;
-    ensure!(status.success(), "Git: {}", errors);
-    let mut output = String::new();
-    stdout.read_to_string(&mut output)?;
-    Ok(output)
 }
 
 fn churn(history: &str) -> Value {
@@ -137,9 +100,7 @@ pub fn sources(service: &QueryService, args: &Value) -> Result<Value> {
         .manifest
         .files
         .iter()
-        .filter(|(path, _)| {
-            path.ends_with(".rs") || path.ends_with(".go") || semweft_query::web::is_source(path)
-        })
+        .filter(|(path, _)| semweft_query::workspace::is_source(path))
         .collect::<Vec<_>>();
     ensure!(
         offset <= files.len(),
@@ -169,6 +130,16 @@ pub fn review(resolved: &Resolved, args: &Value) -> Result<Value> {
             .as_str()
             .context("invalid_argument: review conclusion required")?,
         args["note"].as_str().unwrap_or(""),
+    )
+}
+
+pub fn review_status(service: &QueryService, resolved: &Resolved, args: &Value) -> Result<Value> {
+    semweft_query::reviews::status(
+        resolved,
+        &service.engine,
+        args["review_id"]
+            .as_str()
+            .context("invalid_argument: review id required")?,
     )
 }
 

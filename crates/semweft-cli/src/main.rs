@@ -663,18 +663,23 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
         } => {
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(*wait_ms);
             loop {
-                let mut value = daemon::call(
+                let status = daemon::call(
                     &resolved,
-                    "get_review_result",
-                    json!({"review_id":review_id,"timeout_ms":60000}),
+                    "__review_status",
+                    json!({"review_id":review_id}),
                 )?;
-                let changed = value["review"]["revision"]
+                let changed = status["revision"]
                     .as_u64()
                     .is_some_and(|revision| revision > *after_revision)
-                    || value["review"]["state"] == "superseded"
-                    || value.get("error").is_some();
+                    || status["state"] == "superseded"
+                    || status.get("error").is_some();
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                 if changed || remaining.is_zero() {
+                    let mut value = daemon::call(
+                        &resolved,
+                        "get_review_result",
+                        json!({"review_id":review_id,"timeout_ms":60000}),
+                    )?;
                     value["wait"] = json!({"changed":changed,"after_revision":after_revision});
                     return Ok(Some(value));
                 }
