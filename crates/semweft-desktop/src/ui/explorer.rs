@@ -46,9 +46,20 @@ pub(super) struct Explorer {
     risk_inputs: Option<Value>,
     risk_path: String,
     side: String,
+    evidence: String,
 }
 
 impl Explorer {
+    fn refresh_evidence(&mut self) {
+        let report = &self.report;
+        let selected = self
+            .rows
+            .get(self.selected)
+            .map(|(_, value)| value)
+            .unwrap_or(&Value::Null);
+        self.evidence = serde_json::to_string_pretty(&json!({"selected":selected,"risk_summary":report["risk_summary"],"api_summary":report["api_summary"],"contract_summary":report["contract_summary"],"implementation_counts":report["implementation_counts"],"guard":report["guard"],"completeness":report["completeness"],"output":report["output"]})).unwrap_or_default();
+    }
+
     pub(super) fn reset(&mut self) {
         self.cancellation.cancel();
         *self = Self {
@@ -201,6 +212,7 @@ impl Desktop {
                                     .map(move |value| ((*field).to_owned(), value.clone()))
                             })
                             .collect();
+                        this.explorer.refresh_evidence();
                     }
                     Err(error) => {
                         this.explorer.error_code =
@@ -293,13 +305,13 @@ impl Desktop {
                 let title = ["qualified_name", "name", "message", "path", "kind"].into_iter().find_map(|key| item[key].as_str()).map(str::to_owned)
                     .unwrap_or_else(|| format!("{} → {}", item["from"].as_str().unwrap_or("关系"), item["to"].as_str().unwrap_or("详情")));
                 rsx! { <div id={("explorer-result", index)} class="h-[68px] p-3 border-b cursor-pointer" border_color={rgb(LINE)} whenClass={(index == this.explorer.selected, "bg-[#e9f4ef]")} hoverClass="bg-[#f7f9fc]"
-                    onClick={cx.listener(move |this, _, _, cx| { this.explorer.selected = index; cx.notify(); })}>
+                    onClick={cx.listener(move |this, _, _, cx| { this.explorer.selected = index; this.explorer.refresh_evidence(); cx.notify(); })}>
                     <div class="truncate font-medium">{title}</div><div base={muted(format!("{} · {}", field, item["certainty"].as_str().unwrap_or("按证据核查")))} class="mt-1 truncate" />
                 </div> }.into_any_element()
             }).collect::<Vec<_>>()
         }));
         rsx! { <div class="flex flex-col flex-1 min-h-0">
-            <div class="flex flex-wrap gap-2 mb-2">{for (index, (_, label)) in TOOLS.into_iter().enumerate() { <ActionButton id={("explorer-tool", index)} compact activeIf={index == self.explorer.tool} disabledIf={self.explorer.busy} onClick={cx.listener(move |this, _, _, cx| { this.explorer.tool = index; this.explorer.report = Value::Null; this.explorer.rows.clear(); this.explorer.error.clear(); cx.notify(); })}>{label}</ActionButton> }}</div>
+            <div class="flex flex-wrap gap-2 mb-2">{for (index, (_, label)) in TOOLS.into_iter().enumerate() { <ActionButton id={("explorer-tool", index)} compact activeIf={index == self.explorer.tool} disabledIf={self.explorer.busy} onClick={cx.listener(move |this, _, _, cx| { this.explorer.tool = index; this.explorer.report = Value::Null; this.explorer.rows.clear(); this.explorer.error.clear(); this.explorer.refresh_evidence(); cx.notify(); })}>{label}</ActionButton> }}</div>
             <div class="flex gap-2 items-center p-3 bg-white border rounded-xl mb-2" border_color={rgb(LINE)}>
                 <div class="flex-1 h-[28px]">{self.explore_from.clone()}</div>
                 {...(self.explorer.tool == 0).then(|| rsx! { <div class="flex-1 h-[28px]">{self.explore_to.clone()}</div> })}
@@ -321,7 +333,7 @@ impl Desktop {
                 <div id="explorer-evidence" class="flex-1 min-w-0 overflow-y-scroll p-3">
                     {heading("结果、证据与分析范围")}
                     <div class="flex flex-wrap gap-2 my-2">{for (index, (side, location)) in locations.into_iter().enumerate() { <ActionButton id={("explorer-source", index)} compact disabledIf={self.data.verify_location_on(&location, &side).is_err()} onClick={cx.listener({ let location = location.clone(); let side = side.clone(); move |this, _, _, cx| { this.open_side(location.file.clone(), location.line, &side, true, cx); this.page = Page::Files; } })}>{format!("{} {}:{}", side.to_uppercase(), location.file, location.line)}</ActionButton> }}</div>
-                    <div font_family="Menlo" text_size={px(10.)}>{for line in serde_json::to_string_pretty(&json!({"selected":selected,"risk_summary":report["risk_summary"],"api_summary":report["api_summary"],"contract_summary":report["contract_summary"],"implementation_counts":report["implementation_counts"],"guard":report["guard"],"completeness":report["completeness"],"output":report["output"]})).unwrap_or_default().lines() { <div>{line.to_owned()}</div> }}</div>
+                    <div font_family="Menlo" text_size={px(10.)}>{for line in self.explorer.evidence.lines() { <div>{line.to_owned()}</div> }}</div>
                 </div>
             </div>
         </div> }.into_any_element()

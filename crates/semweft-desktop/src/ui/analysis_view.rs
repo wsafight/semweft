@@ -11,6 +11,7 @@ pub(super) struct AnalysisState {
     selected: usize,
     seen: BTreeSet<String>,
     review: Value,
+    evidence: String,
 }
 
 const TOOLS: [&str; 3] = ["verify_change", "suggest_tests", "arch_check"];
@@ -28,6 +29,17 @@ const FIELDS: [&str; 10] = [
 ];
 
 impl AnalysisState {
+    fn refresh_evidence(&mut self) {
+        let report = &self.report;
+        let list_key = if self.tool == 1 {
+            "test_candidates"
+        } else {
+            "findings"
+        };
+        let item = &report[list_key][self.selected];
+        self.evidence = serde_json::to_string_pretty(&json!({"selected":item,"completeness":report["completeness"],"verification":report["verification"],"test_summary":report["test_summary"],"architecture":report["architecture"],"output":report["output"]})).unwrap_or_default();
+    }
+
     pub(super) fn is_request(&self) -> bool {
         self.review["kind"] == "request"
     }
@@ -45,6 +57,7 @@ impl Desktop {
         self.analysis.reset();
         self.analysis.report = review["report"].clone();
         self.analysis.review = review;
+        self.analysis.refresh_evidence();
         self.page = Page::Analysis;
         cx.notify();
     }
@@ -216,6 +229,7 @@ impl Desktop {
                         } else {
                             this.analysis.report = page;
                         }
+                        this.analysis.refresh_evidence();
                     }
                     Err(error) => this.analysis.error = format!("检查未完成：{error:#}"),
                 }
@@ -302,7 +316,7 @@ impl Desktop {
                 let item = &this.analysis.report[list_key][index];
                 let title = if list_key == "test_candidates" { item["test"]["qualified_name"].as_str().unwrap_or("测试候选") } else { item["message"].as_str().unwrap_or("规则发现") };
                 let detail = if list_key == "test_candidates" { format!("{} · {} · 未执行", item["availability"].as_str().unwrap_or(""), item["certainty"].as_str().unwrap_or("candidate")) } else { format!("{} · {} · {}", item["rule_id"].as_str().unwrap_or(""), item["severity"].as_str().unwrap_or(""), item["status"].as_str().unwrap_or("")) };
-                rsx! { <div id={("analysis-row", index)} class="h-[68px] p-3 border-b cursor-pointer" border_color={rgb(LINE)} whenClass={(this.analysis.selected == index, "bg-[#edf5f0]")} hoverClass="bg-[#f3f6fa]" onClick={cx.listener(move |this, _, _, cx| { this.analysis.selected = index; cx.notify(); })}>
+                rsx! { <div id={("analysis-row", index)} class="h-[68px] p-3 border-b cursor-pointer" border_color={rgb(LINE)} whenClass={(this.analysis.selected == index, "bg-[#edf5f0]")} hoverClass="bg-[#f3f6fa]" onClick={cx.listener(move |this, _, _, cx| { this.analysis.selected = index; this.analysis.refresh_evidence(); cx.notify(); })}>
                     <div class="truncate" text_size={px(12.)}>{title.to_owned()}</div><div base={muted(detail)} class="truncate mt-2" text_size={px(10.)} />
                 </div> }
             }).collect::<Vec<_>>()
@@ -346,7 +360,7 @@ impl Desktop {
                         <div class="flex gap-2 my-3">
                             {...location.map(|location| rsx! { <ActionButton id="analysis-source" onClick={cx.listener(move |this, _, _, cx| { if this.data.verify_location_on(&location, side).is_ok() { this.open_side(location.file.clone(), location.line, side, true, cx); this.page = Page::Files; } else { this.message = "证据位置缺少匹配的源码身份".into(); cx.notify(); } })}>{"打开证据源码"}</ActionButton> })}
                         </div>
-                        <div font_family="Menlo" text_size={px(10.)}>{for line in serde_json::to_string_pretty(&json!({"selected":item,"completeness":report["completeness"],"verification":report["verification"],"test_summary":report["test_summary"],"architecture":report["architecture"],"output":report["output"]})).unwrap_or_default().lines() { <div>{line.to_owned()}</div> }}</div>
+                        <div font_family="Menlo" text_size={px(10.)}>{for line in self.analysis.evidence.lines() { <div>{line.to_owned()}</div> }}</div>
                         {...request.then(|| rsx! { <div class="mt-4">{heading("审查意见")}
                             {for event in self.analysis.review["events"].as_array().into_iter().flatten().rev().take(30) {
                                 <div class="py-2 border-b" border_color={rgb(LINE)}><div class="font-medium">{format!("{} · {} · 修订 {}", event["reviewer"].as_str().unwrap_or(""), event["conclusion"].as_str().unwrap_or(""), event["revision"])}</div><div>{event["note"].as_str().unwrap_or("").to_owned()}</div><div base={muted(event["location"].to_string())} /></div>
